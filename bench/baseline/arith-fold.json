@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "kernel_fingerprint": "e87a79708795a9ed53ca727a6e4ebe69082b019d59d239190fd826df0d994e31",
+  "corpus_file_hash": "95cd42e09f641f28875011f5b6cf670ef4edbc538c8d0c7fd54921f12fc37bd5",
+  "words": {
+    "addk": {
+      "byte_length": 5,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "03a71a786dbb096604fc241aa4f1da936b6841f912113fbd58afded8954aa810",
+      "instruction_count": 2,
+      "rbp_adjust_count": 0
+    },
+    "fold-chain": {
+      "byte_length": 33,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "c9bc3824bd36a2e943cd083234f87885a67a9c859341824df1300bfd339ccc19",
+      "instruction_count": 9,
+      "rbp_adjust_count": 0
+    },
+    "fold-mix": {
+      "byte_length": 111,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "0f3bb020556611da4059a3627ca3191939842963187ce26cdca5e67fc9f6db12",
+      "instruction_count": 29,
+      "rbp_adjust_count": 2
+    },
+    "fold-poly": {
+      "byte_length": 13,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "d9ad75872b4ce4beeac95ba2f95ac2b097d3f79ffff7e86347908813635cdd48",
+      "instruction_count": 4,
+      "rbp_adjust_count": 0
+    }
+  },
+  "file_totals": {
+    "bytes": 162,
+    "instr": 44,
+    "calls": 0,
+    "jmps": 0,
+    "do_lit": 0
+  }
+}

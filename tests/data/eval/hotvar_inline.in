@@ -1,0 +1,5 @@
+hotvariable hv
+: hot-sum 0 hv ! 0 ?do hv @ i + hv ! loop hv @ ;
+100 hot-sum .
+42 hv ! hv @ .
+bye

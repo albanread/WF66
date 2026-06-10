@@ -1,0 +1,313 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — floating-point subset, FTOS-cached.
+;
+; The floating-point stack is a separate stack in the user area, but its
+; TOP element is cached in XMM15 (FTOS), exactly as the data stack caches
+; its top in RAX.  user_FSP points at the SECOND item (FNOS) in memory; the
+; in-memory stack does NOT contain the top.  An N-deep FP stack is
+;   xmm15 (top)  +  (N-1) doubles in memory at [FSP], [FSP+8], …
+;
+; Invariant (mirror of RBP/RAX for the data stack):
+;   • xmm15 = FTOS, valid only when fdepth ≥ 1 (undefined when empty).
+;   • user_FSP → FNOS.  Empty: user_FSP == user_FP0.
+;   • fdepth = (FP0 - FSP)/cell        (UNCHANGED formula).
+;   • push:  movsd [FSP-cell],xmm15 ; sub FSP,cell ; movsd xmm15,<new>
+;   • pop :  movsd xmm15,[FSP]       ; add FSP,cell
+;   • binary op (top2→1):  <op> xmm15,[FSP] ; add FSP,cell   (commutative)
+;
+; XMM15 is Win64 non-volatile and saved/reloaded by forth_main, so FTOS
+; threads across word calls and host call-outs for free — like RAX.  No
+; primitive outside this file (and the FP helpers in compile/interp/fmath/
+; strings/gc/igui) may use XMM15.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached data TOS; XMM15 is the cached FP TOS.
+; Scratch with RCX/RDX/R8-R11 and XMM0/XMM1; never clobber RAX or XMM15
+; unless you mean to change the respective top-of-stack.
+; ─────────────────────────────────────────────────────────────────────
+
+; float+  ( f-addr -- f-addr' )
+proc(float_plus)
+    add     rax, cell
+    stk(1, 1)
+    next()
+endp()
+
+; floats  ( n -- n*float )
+proc(floats)
+    shl     rax, 3
+    stk(1, 1)
+    next()
+endp()
+
+; faligned  ( addr -- f-addr )
+proc(faligned)
+    add     rax, cell - 1
+    and     rax, -cell
+    stk(1, 1)
+    next()
+endp()
+
+; falign  ( -- )
+proc(falign)
+    mov     rcx, [UP + user_VAR_HERE]        ; data space (floats are data)
+    add     rcx, cell - 1
+    and     rcx, -cell
+    mov     [UP + user_VAR_HERE], rcx
+    next()
+endp()
+
+; float?  ( c-addr u -- -1 | c-addr u 0 )  ( F: -- r )
+;     Parse a decimal floating-point token when BASE is decimal.
+;
+;     Win64 caveat: r10 and r11 are caller-saved volatile registers, so
+;     `win64_call(rt_to_float)` clobbers them. The earlier version held
+;     the original c-addr / u in r10 / r11 across the call, and the
+;     .invalid path then spilled the garbage-r11 to NOS — corrupting the
+;     length pushed back to the interpreter for every decimal token that
+;     wasn't a valid float. Cache `u` in r14 (callee-saved). R15 is
+;     reserved as the locals-stack pointer (LP), so we use r14 here.
+;     c-addr is unchanged at [DSP] across the call, no save needed.
+proc(float_q)
+    mov     r10, [DSP]                      ; original c-addr (only used pre-call)
+    mov     r14, TOS                        ; original u — r14 survives the call
+    cmp     qword ptr [UP + user_BASE], 10
+    jne     .invalid
+    test    r14, r14
+    jz      .invalid
+
+    mov     rcx, r10
+    mov     rdx, r14
+    lea     r8, [UP + user_FP_TMP]
+    win64_call(rt_to_float)
+    test    rax, rax
+    jz      .invalid
+
+    ; success: push the parsed double (in user_FP_TMP) as the new FTOS.
+    mov     rcx, [UP + user_FSP]
+    movsd   qword ptr [rcx - cell], xmm15   ; spill old FTOS to new FNOS slot
+    sub     rcx, cell
+    mov     [UP + user_FSP], rcx
+    movsd   xmm15, qword ptr [UP + user_FP_TMP]
+    mov     TOS, -1
+    add     DSP, cell
+    next()
+
+.invalid:
+    mov     [DSP - cell], r14               ; r14 still holds the original u
+    xor     TOS, TOS
+    stk(2, 3)
+    next()
+endp()
+
+; fdepth  ( -- n )
+;     (FP0 - FSP)/cell — the cached FTOS is counted by the FSP decrement on
+;     push, exactly like RAX is counted for the data stack.
+proc(fdepth)
+    mov     [DSP - cell], TOS
+    mov     rcx, [UP + user_FP0]
+    sub     rcx, [UP + user_FSP]
+    sar     rcx, 3
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()
+
+; fdrop  ( F: r -- )
+;     pop: reload FTOS from FNOS.
+proc(fdrop)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm15, qword ptr [rcx]
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; fdup  ( F: r -- r r )
+;     push a copy of FTOS (FTOS itself is unchanged).
+proc(fdup)
+    mov     rcx, [UP + user_FSP]
+    movsd   qword ptr [rcx - cell], xmm15
+    sub     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; fswap  ( F: r1 r2 -- r2 r1 )
+;     FTOS=r2, [FSP]=r1 ↔ FTOS=r1, [FSP]=r2.
+proc(fswap)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]           ; r1
+    movsd   qword ptr [rcx], xmm15          ; [FSP] := r2
+    movsd   xmm15, xmm0                     ; FTOS := r1
+    next()
+endp()
+
+; fover  ( F: r1 r2 -- r1 r2 r1 )
+;     push a copy of FNOS (r1) on top.
+proc(fover)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]           ; r1 (FNOS)
+    movsd   qword ptr [rcx - cell], xmm15   ; spill r2 to new FNOS slot
+    sub     rcx, cell
+    mov     [UP + user_FSP], rcx
+    movsd   xmm15, xmm0                     ; FTOS := r1
+    next()
+endp()
+
+; d>f  ( d -- )  ( F: -- r )
+;     Current subset accepts sign-extended 64-bit doubles.
+proc(d_to_f)
+    mov     rcx, [DSP]                      ; low cell of d (the integer)
+    cvtsi2sd xmm0, rcx
+    mov     rdx, [UP + user_FSP]
+    movsd   qword ptr [rdx - cell], xmm15   ; spill old FTOS
+    sub     rdx, cell
+    mov     [UP + user_FSP], rdx
+    movsd   xmm15, xmm0                     ; FTOS := (double)int
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; f>d  ( -- d )  ( F: r -- )
+proc(f_to_d)
+    cvttsd2si rcx, xmm15                    ; int = (i64)FTOS
+    mov     rdx, rcx
+    sar     rdx, 63                         ; sign-extend to high cell
+    mov     r8, [UP + user_FSP]             ; pop FP stack
+    movsd   xmm15, qword ptr [r8]
+    add     r8, cell
+    mov     [UP + user_FSP], r8
+    mov     [DSP - cell], TOS               ; push d (low, high)
+    mov     [DSP - 2*cell], rcx
+    mov     TOS, rdx
+    stk(0, 2)
+    next()
+endp()
+
+; f@  ( f-addr -- )  ( F: -- r )
+proc(f_fetch)
+    mov     rcx, TOS                        ; addr
+    mov     rdx, [UP + user_FSP]
+    movsd   qword ptr [rdx - cell], xmm15   ; spill old FTOS
+    sub     rdx, cell
+    mov     [UP + user_FSP], rdx
+    movsd   xmm15, qword ptr [rcx]          ; FTOS := [addr]
+    mov     TOS, [DSP]                      ; addr consumed
+    stk(1, 0)
+    next()
+endp()
+
+; f!  ( f-addr -- )  ( F: r -- )
+proc(f_store)
+    mov     rcx, TOS                        ; addr
+    movsd   qword ptr [rcx], xmm15          ; [addr] := FTOS
+    mov     rdx, [UP + user_FSP]
+    movsd   xmm15, qword ptr [rdx]          ; reload FTOS from FNOS
+    add     rdx, cell
+    mov     [UP + user_FSP], rdx
+    mov     TOS, [DSP]                      ; addr consumed
+    stk(1, 0)
+    next()
+endp()
+
+; f+  ( F: r1 r2 -- r3 )   r3 = r1 + r2  (commutative)
+proc(f_plus)
+    mov     rcx, [UP + user_FSP]
+    addsd   xmm15, qword ptr [rcx]          ; FTOS = r2 + r1
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; f-  ( F: r1 r2 -- r3 )   r3 = r1 - r2
+proc(f_minus)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]           ; r1 (FNOS)
+    subsd   xmm0, xmm15                     ; r1 - r2
+    movsd   xmm15, xmm0
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; f*  ( F: r1 r2 -- r3 )   r3 = r1 * r2  (commutative)
+proc(f_times)
+    mov     rcx, [UP + user_FSP]
+    mulsd   xmm15, qword ptr [rcx]          ; FTOS = r2 * r1
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; f/  ( F: r1 r2 -- r3 )   r3 = r1 / r2
+proc(f_slash)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]           ; r1 (FNOS)
+    divsd   xmm0, xmm15                     ; r1 / r2
+    movsd   xmm15, xmm0
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; fnegate  ( F: r1 -- r2 )   depth unchanged
+proc(f_negate)
+    xorpd   xmm0, xmm0
+    subsd   xmm0, xmm15
+    movsd   xmm15, xmm0
+    next()
+endp()
+
+; f0=  ( -- flag )  ( F: r -- )
+proc(f_zero_equal)
+    xorpd   xmm0, xmm0
+    ucomisd xmm15, xmm0
+    sete    cl
+    movzx   rcx, cl
+    neg     rcx
+    mov     rdx, [UP + user_FSP]            ; pop FP stack
+    movsd   xmm15, qword ptr [rdx]
+    add     rdx, cell
+    mov     [UP + user_FSP], rdx
+    mov     [DSP - cell], TOS
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()
+
+; f0<  ( -- flag )  ( F: r -- )
+proc(f_zero_less)
+    xorpd   xmm0, xmm0
+    ucomisd xmm15, xmm0                     ; CF=1 if FTOS < 0
+    setb    cl
+    movzx   rcx, cl
+    neg     rcx
+    mov     rdx, [UP + user_FSP]            ; pop FP stack
+    movsd   xmm15, qword ptr [rdx]
+    add     rdx, cell
+    mov     [UP + user_FSP], rdx
+    mov     [DSP - cell], TOS
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()
+
+; f<  ( -- flag )  ( F: r1 r2 -- )   flag = r1 < r2; pops both floats
+proc(f_less)
+    mov     rdx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rdx]           ; r1 (FNOS)
+    ucomisd xmm0, xmm15                     ; CF=1 if r1 < r2
+    setb    cl
+    movzx   rcx, cl
+    neg     rcx
+    movsd   xmm15, qword ptr [rdx + cell]   ; new FTOS (item below r1)
+    add     rdx, 2*cell
+    mov     [UP + user_FSP], rdx
+    mov     [DSP - cell], TOS
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()

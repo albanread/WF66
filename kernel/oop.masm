@@ -1,0 +1,266 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — object-system dispatch primitives (Phase 0).
+;
+; The class/object DSL itself (class, subclass, ivar:, :m, ;m, new, ->,
+; super) lives in lib/oop.f and is pure Forth.  Only the message-send
+; hot path is here: a late-bound (send), an early-bound (send-xt), and
+; the `self` accessor.  See docs/oop_design.md.
+;
+;   Class struct:   [ class_super | class_isize | class_vt[CAP] ]
+;   Object layout:  [ class-ptr | ivar0 | ivar1 | ... ]
+;
+; `self` (the current receiver) lives in user_SELF.  Each send saves the
+; previous self on the return stack and restores it after the method
+; returns, so nested sends, recursion, and EXIT-in-method are all safe:
+; the save/restore bracket lives in the SEND frame, not the method.
+; ─────────────────────────────────────────────────────────────────────
+
+; self  ( -- obj )
+;     Push the current receiver (0 when not inside a method).
+proc(self_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_SELF]
+    stk(0, 1)
+    next()
+endp()
+
+; (send)  ( i*x obj sel -- j*x )
+;     Late-bound message send.  obj = receiver (NOS), sel = selector id
+;     (TOS).  Look the method xt up in obj's class vtable, then dispatch.
+proc(send_word)
+    mov     rcx, [DSP]                  ; rcx = obj (receiver)
+    mov     rdx, [rcx]                  ; rdx = class struct (obj+0)
+    shl     rax, 3                      ; rax = sel * cell   (TOS consumed)
+    add     rax, rdx
+    mov     r8, [rax + class_vt]        ; r8 = vtable[sel] = method xt
+    mov     TOS, [DSP + cell]           ; drop obj+sel, expose first real arg
+    add     DSP, 2*cell
+    jmp     send_enter                  ; r8 = xt, rcx = obj
+endp()
+
+; (send-xt)  ( i*x obj xt -- j*x )
+;     Early-bound message send: the method xt is already resolved, so no
+;     vtable lookup.  Used by the compiler's early-binding path.
+proc(send_xt_word)
+    mov     r8, rax                     ; r8 = xt (TOS)
+    mov     rcx, [DSP]                  ; rcx = obj (receiver)
+    mov     TOS, [DSP + cell]           ; drop obj+xt, expose first real arg
+    add     DSP, 2*cell
+    jmp     send_enter                  ; r8 = xt, rcx = obj
+endp()
+
+; send_enter  ( internal )   r8 = method xt, rcx = receiver
+;     Bracket self around a tail-jump into the method.  The method's RET
+;     lands in send_restore, which pops the saved self and returns to the
+;     send's own caller.  No caller-saved register is held across the
+;     method call, so the method may freely clobber scratch / use the
+;     return stack / EXIT early.
+proc(send_enter)
+    mov     r9, [UP + user_SELF]        ; old self
+    mov     [UP + user_SELF], rcx       ; self := receiver
+    push    r9                          ; [ old_self | caller_ret ]
+    lea     r10, [rip + send_restore]
+    push    r10                         ; [ send_restore | old_self | caller_ret ]
+    jmp     r8                          ; tail into the method body
+endp()
+
+; send_restore  ( internal )
+;     Method returned here; restore the previous self and return to the
+;     send's caller.
+proc(send_restore)
+    pop     r9                          ; old self  ( caller_ret remains )
+    mov     [UP + user_SELF], r9
+    next()                              ; ret -> send's caller
+endp()
+
+; ─────────────────────────────────────────────────────────────────────
+; Value-property (ivar) inline emitters.  An ivar word's body cell holds
+; the field byte-offset; lib/oop.f installs (inline-ivar,) as its compile
+; action (dh_comp) so a reference emits an INLINE read of the VALUE (not
+; the address), and `to`/`addr-of` use the two emitters below.  Each emits
+; straight into the dict at HERE, mirroring inline_var_comp.  self lives in
+; [UP + user_SELF]; the field is at self + offset.
+; ─────────────────────────────────────────────────────────────────────
+
+; (inline-ivar,)  ( xt -- )   compile action for an ivar word.
+;     Emits a push of the field VALUE:
+;         mov [rbp-8], rax            ; spill TOS
+;         sub rbp, 8                  ; bump DSP
+;         mov rax, [UP + user_SELF]   ; rax = self (receiver base)
+;         mov rax, [rax + offset]     ; new TOS = field value
+proc(inline_ivar_comp)
+    mov     r8, [UP + user_HERE]
+    mov     rcx, [rax + 6]              ; body address = stub's baked imm64
+    mov     rdx, [rcx]                  ; rdx = field byte offset
+    mov     byte ptr [r8 + 0], 0x48     ; mov [rbp-8], rax
+    mov     byte ptr [r8 + 1], 0x89
+    mov     byte ptr [r8 + 2], 0x45
+    mov     byte ptr [r8 + 3], 0xF8
+    mov     byte ptr [r8 + 4], 0x48     ; sub rbp, 8
+    mov     byte ptr [r8 + 5], 0x83
+    mov     byte ptr [r8 + 6], 0xED
+    mov     byte ptr [r8 + 7], 0x08
+    mov     byte ptr [r8 + 8], 0x48     ; mov rax, [UP + user_SELF]  (48 8B 83 disp32)
+    mov     byte ptr [r8 + 9], 0x8B
+    mov     byte ptr [r8 + 10], 0x83
+    mov     dword ptr [r8 + 11], user_SELF
+    mov     byte ptr [r8 + 15], 0x48    ; mov rax, [rax + offset]    (48 8B 80 disp32)
+    mov     byte ptr [r8 + 16], 0x8B
+    mov     byte ptr [r8 + 17], 0x80
+    mov     dword ptr [r8 + 18], edx
+    add     r8, 22
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; ─────────────────────────────────────────────────────────────────────
+; Polymorphic-inline-cache dispatch (monomorphic, data-side).
+;
+; A late `obj -> sel` compiles to an INLINE fast path (emitted by
+; (send-pic,)) that reads a 32-byte cache record living in the no-execute
+; VAR region — NOT byte-patched code, so it never triggers the x86
+; self-modifying-code machine-clear stall (commit edd3baa) on the hottest
+; code in the program.  Record layout:
+;     +0  cached_class   (0 = cold; -1 = megamorphic, don't cache)
+;     +8  cached_xt      (resolved method xt for cached_class)
+;     +16 selector_id    (constant for this site)
+;     +24 site_epoch     (user_OOP_EPOCH when filled)
+; A hit needs class == cached_class AND epoch == site_epoch (the epoch
+; invalidates every site at once when vt! rewrites any vtable slot).  On a
+; hit the fast path skips the class->vtable[sel] index + the second
+; dependent load; both hit and miss converge on send_enter, so the self
+; save/restore bracket is identical to (send).  The receiver arrives in TOS
+; (no selector is pushed on the data stack — it lives in the record).
+; ─────────────────────────────────────────────────────────────────────
+
+; send_pic_miss  ( internal )   rax = receiver, r11 = &record.
+;     Resolve the method the normal way, fill the cache (unless megamorphic),
+;     then tail into the method via send_enter.
+proc(send_pic_miss)
+    mov     rdx, [rax]                  ; class = [receiver]
+    mov     r9,  [r11 + 16]             ; sel
+    shl     r9, 3
+    add     r9, rdx
+    mov     r8, [r9 + class_vt]         ; xt = vtable[sel]
+    cmp     qword ptr [r11], -1         ; megamorphic sentinel? don't cache
+    je      .skipfill
+    mov     [r11 + 0], rdx              ; cached_class := class
+    mov     [r11 + 8], r8              ; cached_xt    := xt
+    mov     r10, [UP + user_OOP_EPOCH]
+    mov     [r11 + 24], r10             ; site_epoch   := current epoch
+.skipfill:
+    mov     rcx, rax                    ; rcx = receiver
+    mov     rax, [rbp]                  ; new TOS = first real arg
+    add     rbp, 8                      ; drop receiver
+    jmp     send_enter                  ; r8 = xt, rcx = receiver
+endp()
+
+; (send-pic,)  ( sel -- )   compile a monomorphic-inline-cache send site.
+;     Allocate + zero a 32-byte cache record in the VAR region (selector baked
+;     in), then emit the 59-byte fast-path stub at HERE.  Receiver in TOS(rax)
+;     at run time; misses tail to send_pic_miss (r11 = &record).
+proc(send_pic_comp)
+    ; ── allocate + init the cache record in VAR space ──
+    mov     r10, [UP + user_VAR_HERE]
+    mov     qword ptr [r10 + 0], 0          ; cached_class (cold)
+    mov     qword ptr [r10 + 8], 0          ; cached_xt
+    mov     [r10 + 16], rax                 ; selector_id := sel (TOS)
+    mov     qword ptr [r10 + 24], 0         ; site_epoch
+    lea     rdx, [r10 + 32]
+    mov     [UP + user_VAR_HERE], rdx       ; bump VAR_HERE by 32
+
+    ; ── emit the fast-path stub at HERE ──
+    mov     r8, [UP + user_HERE]
+    lea     rcx, [rip + send_pic_miss]      ; rcx = miss handler (constant)
+    lea     r9,  [rip + send_enter]         ; r9  = method-enter (constant)
+
+    mov     byte ptr [r8 + 0], 0x49         ; mov r11, rec   (49 BB imm64)
+    mov     byte ptr [r8 + 1], 0xBB
+    mov     [r8 + 2], r10                   ; imm64 = &record
+    mov     byte ptr [r8 + 10], 0x48        ; mov rdx, [rax]   (class = [receiver])
+    mov     byte ptr [r8 + 11], 0x8B
+    mov     byte ptr [r8 + 12], 0x10
+    mov     byte ptr [r8 + 13], 0x49        ; cmp rdx, [r11]   (== cached_class?)
+    mov     byte ptr [r8 + 14], 0x3B
+    mov     byte ptr [r8 + 15], 0x13
+    mov     byte ptr [r8 + 16], 0x0F        ; jne send_pic_miss  (0F 85 rel32)
+    mov     byte ptr [r8 + 17], 0x85
+    lea     rdx, [r8 + 22]                  ; next IP after this jne
+    mov     r11, rcx
+    sub     r11, rdx
+    mov     dword ptr [r8 + 18], r11d
+    mov     byte ptr [r8 + 22], 0x4C        ; mov r9, [UP + user_OOP_EPOCH]  (4C 8B 8B disp32)
+    mov     byte ptr [r8 + 23], 0x8B
+    mov     byte ptr [r8 + 24], 0x8B
+    mov     dword ptr [r8 + 25], user_OOP_EPOCH
+    mov     byte ptr [r8 + 29], 0x4D        ; cmp r9, [r11+24]   (== site_epoch?)
+    mov     byte ptr [r8 + 30], 0x3B
+    mov     byte ptr [r8 + 31], 0x4B
+    mov     byte ptr [r8 + 32], 0x18
+    mov     byte ptr [r8 + 33], 0x0F        ; jne send_pic_miss  (0F 85 rel32)
+    mov     byte ptr [r8 + 34], 0x85
+    lea     rdx, [r8 + 39]
+    mov     r11, rcx
+    sub     r11, rdx
+    mov     dword ptr [r8 + 35], r11d
+    mov     byte ptr [r8 + 39], 0x4D        ; mov r8, [r11+8]   (r8 = cached_xt)
+    mov     byte ptr [r8 + 40], 0x8B
+    mov     byte ptr [r8 + 41], 0x43
+    mov     byte ptr [r8 + 42], 0x08
+    mov     byte ptr [r8 + 43], 0x48        ; mov rcx, rax      (rcx = receiver)
+    mov     byte ptr [r8 + 44], 0x89
+    mov     byte ptr [r8 + 45], 0xC1
+    mov     byte ptr [r8 + 46], 0x48        ; mov rax, [rbp]    (TOS = first arg)
+    mov     byte ptr [r8 + 47], 0x8B
+    mov     byte ptr [r8 + 48], 0x45
+    mov     byte ptr [r8 + 49], 0x00
+    mov     byte ptr [r8 + 50], 0x48        ; add rbp, 8        (drop receiver)
+    mov     byte ptr [r8 + 51], 0x83
+    mov     byte ptr [r8 + 52], 0xC5
+    mov     byte ptr [r8 + 53], 0x08
+    mov     byte ptr [r8 + 54], 0xE9        ; jmp send_enter    (E9 rel32)
+    lea     rdx, [r8 + 59]
+    sub     r9, rdx
+    mov     dword ptr [r8 + 55], r9d
+    add     r8, 59
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; (ivar-store,)  ( offset -- )   emit an inline store of TOS into self+offset.
+;         mov rcx, [UP + user_SELF]   ; rcx = self
+;         mov [rcx + offset], rax     ; [self+offset] := TOS
+;         mov rax, [rbp]              ; reload TOS from NOS
+;         add rbp, 8                  ; drop
+proc(ivar_store_comp)
+    mov     r8, [UP + user_HERE]
+    mov     rdx, rax                    ; rdx = offset (TOS)
+    mov     byte ptr [r8 + 0], 0x48     ; mov rcx, [UP + user_SELF]  (48 8B 8B disp32)
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x8B
+    mov     dword ptr [r8 + 3], user_SELF
+    mov     byte ptr [r8 + 7], 0x48     ; mov [rcx + offset], rax    (48 89 81 disp32)
+    mov     byte ptr [r8 + 8], 0x89
+    mov     byte ptr [r8 + 9], 0x81
+    mov     dword ptr [r8 + 10], edx
+    mov     byte ptr [r8 + 14], 0x48    ; mov rax, [rbp]
+    mov     byte ptr [r8 + 15], 0x8B
+    mov     byte ptr [r8 + 16], 0x45
+    mov     byte ptr [r8 + 17], 0x00
+    mov     byte ptr [r8 + 18], 0x48    ; add rbp, 8
+    mov     byte ptr [r8 + 19], 0x83
+    mov     byte ptr [r8 + 20], 0xC5
+    mov     byte ptr [r8 + 21], 0x08
+    add     r8, 22
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()

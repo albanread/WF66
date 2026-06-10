@@ -1,0 +1,31 @@
+# Strength reduction in fold_times_comp: `* N` for cheap constants must
+# produce the same results as a plain imul.  Covers every emit branch:
+#   *0 (xor) *1 (nop) *-1 (neg) *2 (add) *3/*5/*9 (lea) pow2 (shl) else (imul)
+# plus runtime-input folds (the multiplicand is not a literal).
+: t0  5 0  * . ;
+: t1  5 1  * . ;
+: tn  5 -1 * . ;
+: t2  5 2  * . ;
+: t3  5 3  * . ;
+: t4  5 4  * . ;
+: t5  5 5  * . ;
+: t8  5 8  * . ;
+: t9  5 9  * . ;
+: t6  5 6  * . ;
+: t16 3 16 * . ;
+: dbl 2 * ;
+: tri 3 * ;
+t0
+t1
+tn
+t2
+t3
+t4
+t5
+t8
+t9
+t6
+t16
+21 dbl .
+4 tri .
+bye

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "kernel_fingerprint": "e87a79708795a9ed53ca727a6e4ebe69082b019d59d239190fd826df0d994e31",
+  "corpus_file_hash": "8da5d288c608781cc612e8b0ad5b92b6f187dbfdca31bda8d186240655a4d9f7",
+  "words": {
+    "absval": {
+      "byte_length": 9,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "acb715ae12262c580143dbbe25356fba0762300ecfccded0ad4d141a8f11c1bd",
+      "instruction_count": 4,
+      "rbp_adjust_count": 0
+    },
+    "cmp-chain": {
+      "byte_length": 186,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "7c51b31058c9d3a20f315ad3599055441b85d9b874521737ad4d2f207cccfe24",
+      "instruction_count": 53,
+      "rbp_adjust_count": 15
+    },
+    "logic-chain": {
+      "byte_length": 151,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "c8a0546fe69b62b842a79147b9370653665e268a6c9cbcf1cbc0436e49abc977",
+      "instruction_count": 43,
+      "rbp_adjust_count": 15
+    },
+    "minmax": {
+      "byte_length": 88,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "251167aad5d5931e82415187114a30067ef654dd73706124effa87dd41bd6626",
+      "instruction_count": 24,
+      "rbp_adjust_count": 4
+    },
+    "shift-chain": {
+      "byte_length": 173,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "1bef2778e5b45fc7de75e6609bbd5c2a112725fc64ae4d51a1a825bdfde962b3",
+      "instruction_count": 50,
+      "rbp_adjust_count": 15
+    },
+    "zero-chain": {
+      "byte_length": 80,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "b29db4839d5a53b17482788992bc28002549ceca3a28b9637ff7928cf67361ce",
+      "instruction_count": 24,
+      "rbp_adjust_count": 8
+    }
+  },
+  "file_totals": {
+    "bytes": 687,
+    "instr": 198,
+    "calls": 0,
+    "jmps": 0,
+    "do_lit": 0
+  }
+}

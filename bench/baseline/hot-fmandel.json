@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kernel_fingerprint": "e87a79708795a9ed53ca727a6e4ebe69082b019d59d239190fd826df0d994e31",
+  "corpus_file_hash": "884e257d9ff7c05411f2e2fad6c174377842e0f23909f05f1397a39e1adb61e2",
+  "words": {
+    "hot-fmandel": {
+      "byte_length": 610,
+      "call_count_E8": 37,
+      "jmp_count_E9": 1,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "21b78de83b4ea3fac034002b38f472f7060f8662840129d487443ff100afe118",
+      "instruction_count": 129,
+      "rbp_adjust_count": 24
+    }
+  },
+  "file_totals": {
+    "bytes": 610,
+    "instr": 129,
+    "calls": 37,
+    "jmps": 1,
+    "do_lit": 0
+  }
+}

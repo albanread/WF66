@@ -1,0 +1,20 @@
+# requires: = <> < and or dup swap
+# Regression: a literal fold that emits exactly as many bytes as the inline
+# literal it replaced (e.g. `= imm32` for a value > 127 is 13 B, the same size
+# as the 13 B literal push) must invalidate the LAST_LIT watermark.  Otherwise
+# the next foldable operator re-folds the already-consumed literal value and
+# clobbers the fold just emitted.  `dup 1 147 = and` mis-compiled to
+# `... and rax,147` and returned a wrong (nonzero) result before the fix.
+: ra  1 147 = . ;
+ra
+: rb  dup 1 147 = and . ;
+200 rb
+147 rb
+: rc  200 = . ;
+200 rc
+5 rc
+: rd  dup 300 < and . ;
+5 rd
+: re  dup 500 <> or . ;
+500 re
+bye

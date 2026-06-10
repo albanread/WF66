@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "kernel_fingerprint": "e87a79708795a9ed53ca727a6e4ebe69082b019d59d239190fd826df0d994e31",
+  "corpus_file_hash": "40ef4264acd6e4b9bc9cd4f8e4ec507102e73dd6d9faf4daa3cfb59a0d3c1ab2",
+  "words": {
+    "clamp": {
+      "byte_length": 7,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "a1eca297ebc3eb1ea3393bfd09fbb3f7e9ddcd4feaeb00bd5475d6b09bd1832c",
+      "instruction_count": 2,
+      "rbp_adjust_count": 0
+    },
+    "dup-step": {
+      "byte_length": 42,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "e81a42ff223b40e8a8695c84bc8ba3d6328401918afe141eb76a2b2f79ec46d5",
+      "instruction_count": 11,
+      "rbp_adjust_count": 4
+    },
+    "dups": {
+      "byte_length": 78,
+      "call_count_E8": 1,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "183e88237b30042492db5dfa1b3125c4f9871c6c2f321c05fad0b9c07d361963",
+      "instruction_count": 21,
+      "rbp_adjust_count": 3
+    },
+    "mix-round": {
+      "byte_length": 59,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "2e387ff69a06e6f29a1b5aca7b652e66cf1f17f95cf61a5fde819ae1cb3965a6",
+      "instruction_count": 16,
+      "rbp_adjust_count": 4
+    },
+    "mix-stackops": {
+      "byte_length": 91,
+      "call_count_E8": 1,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "baebff6ebaebd80d7c8c241a0dcc729e24707060c2f93b30c35c63a30de8c9e5",
+      "instruction_count": 24,
+      "rbp_adjust_count": 4
+    },
+    "swap-step": {
+      "byte_length": 69,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "0dd5e26b0978631fea236497a5c15035a34f2151429d9c920e0def9826fe231f",
+      "instruction_count": 19,
+      "rbp_adjust_count": 2
+    },
+    "swaps": {
+      "byte_length": 118,
+      "call_count_E8": 3,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "5d90d2142e9d714ea3addbcde3b57116611f22505b1302423f0c21e7d02aa6a4",
+      "instruction_count": 31,
+      "rbp_adjust_count": 4
+    }
+  },
+  "file_totals": {
+    "bytes": 464,
+    "instr": 124,
+    "calls": 5,
+    "jmps": 0,
+    "do_lit": 0
+  }
+}
