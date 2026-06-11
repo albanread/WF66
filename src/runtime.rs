@@ -904,6 +904,19 @@ fn wf66_fop_of(up: u64, xt: u64) -> Option<crate::wf66::Fop> {
     }
 }
 
+fn wf66_stackop_of(up: u64, xt: u64) -> Option<crate::wf66::StackOp> {
+    use crate::wf66::StackOp;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_DUP) => Some(StackOp::Dup),
+        x if x == r(crate::USER_WF66_VOC_DROP) => Some(StackOp::Drop),
+        x if x == r(crate::USER_WF66_VOC_SWAP) => Some(StackOp::Swap),
+        x if x == r(crate::USER_WF66_VOC_OVER) => Some(StackOp::Over),
+        x if x == r(crate::USER_WF66_VOC_NIP) => Some(StackOp::Nip),
+        _ => None,
+    }
+}
+
 /// Append a compiled word: a known arithmetic primitive becomes `Inline(fop)`;
 /// anything else becomes a `Word` token, which taints the span as
 /// non-deferrable so the eager body is kept. Arg: UP, xt. Returns 0.
@@ -918,24 +931,21 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
     }
     WF66_IR.with(|b| {
         let mut b = b.borrow_mut();
-        match wf66_fop_of(up, xt) {
-            Some(f) => {
-                if wf66_dbg() {
-                    eprintln!("[wf66] word xt={xt:#x} -> {f:?}");
-                }
-                b.inline(f);
+        if let Some(f) = wf66_fop_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> {f:?}");
             }
-            None => {
-                if wf66_dbg() {
-                    eprintln!(
-                        "[wf66] word xt={xt:#x} -> TAINT (add={:#x} sub={:#x} mul={:#x})",
-                        unsafe { *((up + crate::USER_WF66_VOC_ADD) as *const u64) },
-                        unsafe { *((up + crate::USER_WF66_VOC_SUB) as *const u64) },
-                        unsafe { *((up + crate::USER_WF66_VOC_MUL) as *const u64) },
-                    );
-                }
-                b.word(xt);
+            b.inline(f);
+        } else if let Some(s) = wf66_stackop_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> {s:?}");
             }
+            b.stack(s);
+        } else {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> TAINT");
+            }
+            b.word(xt);
         }
     });
     0

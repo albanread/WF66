@@ -76,6 +76,54 @@ impl Fop {
     }
 }
 
+/// A pure stack-shuffle primitive (Phase 1.1). Lowered settle-everywhere for now
+/// (parity with WF65's inlined shuffles); a later refinement turns these into
+/// zero-cost SSA renames. `rot`/`tuck` are intentionally omitted — they taint
+/// and fall back until the rename scheduler lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackOp {
+    Dup,
+    Drop,
+    Swap,
+    Over,
+    Nip,
+}
+
+impl StackOp {
+    /// Settle-everywhere lowering on the WF65 ABI (TOS in `rax`, NOS at `[rbp]`,
+    /// stack grows down by `cell`). `rcx` is scratch (caller-saved in a leaf body).
+    fn emit(self, out: &mut String) {
+        match self {
+            // ( a -- a a )
+            StackOp::Dup => {
+                out.push_str(&format!("    mov [rbp - {CELL}], rax\n"));
+                out.push_str(&format!("    sub rbp, {CELL}\n"));
+            }
+            // ( a -- )
+            StackOp::Drop => {
+                out.push_str("    mov rax, [rbp]\n");
+                out.push_str(&format!("    add rbp, {CELL}\n"));
+            }
+            // ( a b -- b a )
+            StackOp::Swap => {
+                out.push_str("    mov rcx, [rbp]\n");
+                out.push_str("    mov [rbp], rax\n");
+                out.push_str("    mov rax, rcx\n");
+            }
+            // ( a b -- a b a )
+            StackOp::Over => {
+                out.push_str(&format!("    mov [rbp - {CELL}], rax\n"));
+                out.push_str("    mov rax, [rbp]\n");
+                out.push_str(&format!("    sub rbp, {CELL}\n"));
+            }
+            // ( a b -- b )
+            StackOp::Nip => {
+                out.push_str(&format!("    add rbp, {CELL}\n"));
+            }
+        }
+    }
+}
+
 /// One IR token of a straight-line span (charter §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -89,6 +137,8 @@ pub enum Token {
     /// register-immediate instruction (strength-reduced for `Mul`), with no push
     /// and no data-stack memory traffic.
     ImmOp { op: Fop, k: i64 },
+    /// A stack-shuffle primitive (Phase 1.1).
+    Stack(StackOp),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -117,6 +167,10 @@ impl IrBuilder {
 
     pub fn inline(&mut self, f: Fop) {
         self.tokens.push(Token::Inline(f));
+    }
+
+    pub fn stack(&mut self, op: StackOp) {
+        self.tokens.push(Token::Stack(op));
     }
 
     pub fn word(&mut self, xt: u64) {
@@ -267,6 +321,7 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             }
             Token::Inline(op) => op.emit_bare(&mut s),
             Token::ImmOp { op, k } => emit_imm_op(op, k, &mut s),
+            Token::Stack(op) => op.emit(&mut s),
             Token::Word { .. } | Token::Opaque => return Err(LowerError::Unsupported(t)),
         }
     }
@@ -289,9 +344,12 @@ pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, Low
 /// immediate word's emission, a `CODE:` region) makes the span non-deferrable;
 /// the wired `;` then leaves the eager body in place (the settle fallback).
 pub fn is_deferrable(tokens: &[Token]) -> bool {
-    tokens
-        .iter()
-        .all(|t| matches!(t, Token::Lit(_) | Token::Inline(_) | Token::ImmOp { .. }))
+    tokens.iter().all(|t| {
+        matches!(
+            t,
+            Token::Lit(_) | Token::Inline(_) | Token::ImmOp { .. } | Token::Stack(_)
+        )
+    })
 }
 
 /// Error from the per-definition finalizer.
@@ -556,6 +614,32 @@ mod tests {
         assert!(is_deferrable(&[Token::Lit(1), Token::Inline(Fop::Add)]));
         assert!(!is_deferrable(&[Token::Lit(1), Token::Word { xt: 0 }]));
         assert!(!is_deferrable(&[Token::Opaque]));
+    }
+
+    // ---- stack shuffles (Phase 1.1) ------------------------------------
+
+    #[test]
+    fn stack_ops_assemble() {
+        for op in [
+            StackOp::Dup,
+            StackOp::Drop,
+            StackOp::Swap,
+            StackOp::Over,
+            StackOp::Nip,
+        ] {
+            let asm = lower(&[Token::Stack(op)], "wf66_t_stk").unwrap();
+            wfasm::rasm::assemble(&asm)
+                .unwrap_or_else(|e| panic!("{op:?} rejected: {e:#}\nasm:\n{asm}"));
+        }
+    }
+
+    #[test]
+    fn shuffle_body_is_deferrable_and_compiles() {
+        // : sq dup * ;
+        assert!(is_deferrable(&[Token::Stack(StackOp::Dup), Token::Inline(Fop::Mul)]));
+        let bytes =
+            compile_body_bytes(&[Token::Stack(StackOp::Dup), Token::Inline(Fop::Mul)]).unwrap();
+        assert!(bytes.contains(&0xC3));
     }
 
     #[test]

@@ -801,6 +801,11 @@ pub(crate) const USER_WF66_VOC_AND: u64 = 0x19E8;  // and (and_)
 pub(crate) const USER_WF66_VOC_OR:  u64 = 0x19F0;  // or  (or_)
 pub(crate) const USER_WF66_VOC_XOR: u64 = 0x19F8;  // xor (xor_)
 pub(crate) const USER_WF66_SEMI:    u64 = 0x1A00;  // xt of `;` — transparent to capture
+pub(crate) const USER_WF66_VOC_DUP:  u64 = 0x1A08; // dup (dup_)
+pub(crate) const USER_WF66_VOC_DROP: u64 = 0x1A10; // drop (drop_)
+pub(crate) const USER_WF66_VOC_SWAP: u64 = 0x1A18; // swap (swap_)
+pub(crate) const USER_WF66_VOC_OVER: u64 = 0x1A20; // over (over_)
+pub(crate) const USER_WF66_VOC_NIP:  u64 = 0x1A28; // nip (nip_)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1761,6 +1766,17 @@ impl Wf64Session {
         // its xt so capture treats it as transparent (a terminator, not body).
         let wf66_semi = session.jit.lookup_addr("semicolon").context("wf66 semicolon")?;
         session.write_user_u64(USER_WF66_SEMI, wf66_semi);
+        // Stack-shuffle vocabulary (Phase 1.1).
+        let wf66_dup = session.jit.lookup_addr("dup_").context("wf66 vocab dup_")?;
+        let wf66_drop = session.jit.lookup_addr("drop_").context("wf66 vocab drop_")?;
+        let wf66_swap = session.jit.lookup_addr("swap_").context("wf66 vocab swap_")?;
+        let wf66_over = session.jit.lookup_addr("over_").context("wf66 vocab over_")?;
+        let wf66_nip = session.jit.lookup_addr("nip_").context("wf66 vocab nip_")?;
+        session.write_user_u64(USER_WF66_VOC_DUP, wf66_dup);
+        session.write_user_u64(USER_WF66_VOC_DROP, wf66_drop);
+        session.write_user_u64(USER_WF66_VOC_SWAP, wf66_swap);
+        session.write_user_u64(USER_WF66_VOC_OVER, wf66_over);
+        session.write_user_u64(USER_WF66_VOC_NIP, wf66_nip);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

@@ -148,12 +148,40 @@ fn wf66_matches_eager_oracle() {
 
 #[test]
 fn wf66_non_deferrable_falls_back_to_eager() {
-    // `dup` is not a known Fop -> taints the span -> the eager body stands.
-    // Must still produce the right answer.
+    // `rot` is outside the WF66 vocabulary -> taints the span -> the eager body
+    // stands. Must still produce the right answer.
     let mut s = sess();
     s.set_wf66_enabled(true);
-    let out = s.eval(": sq dup * ;\n6 sq .\nbye\n").unwrap();
-    assert_eq!(out, " ok\n36  ok\n");
+    let out = s.eval(": r3 rot ;\n1 2 3 r3 . . .\nbye\n").unwrap();
+    assert_eq!(out, " ok\n1 3 2  ok\n");
+}
+
+#[test]
+fn wf66_shuffles_match_eager_oracle() {
+    // Phase 1.1: dup/drop/swap/over/nip now compile through WF66 (settle-
+    // everywhere). The eager compiler is the oracle.
+    let cases = [
+        (": sq dup * ;", "5 sq ."),               // 25
+        (": twice dup + ;", "7 twice ."),         // 14
+        (": diff swap - ;", "10 3 diff ."),       // 3 - 10 = -7
+        (": ov over + . . ;", "4 5 ov"),          // over->4 5 4, +->4 9, prints 9 4
+        (": keepb nip ;", "8 9 keepb ."),         // 9
+        (": dropa drop ;", "8 9 dropa ."),        // 8
+        (": mixed 3 * dup + ;", "5 mixed ."),     // 5*3=15, dup+ = 30
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
 }
 
 #[test]
