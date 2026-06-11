@@ -830,6 +830,14 @@ pub(crate) const USER_WF66_VOC_WHILE:  u64 = 0x1AB8; // while  (while_word)
 pub(crate) const USER_WF66_VOC_REPEAT: u64 = 0x1AC0; // repeat (repeat_word)
 pub(crate) const USER_WF66_VOC_ZEQ:    u64 = 0x1AC8; // 0=     (zero_equal)
 pub(crate) const USER_WF66_VOC_ZLT:    u64 = 0x1AD0; // 0<     (zero_less)
+pub(crate) const USER_WF66_VOC_TUCK:   u64 = 0x1AD8; // tuck  (tuck_)
+pub(crate) const USER_WF66_VOC_ROT:    u64 = 0x1AE0; // rot   (rot_)
+pub(crate) const USER_WF66_VOC_NEGROT: u64 = 0x1AE8; // -rot  (neg_rot)
+pub(crate) const USER_WF66_VOC_2DUP:   u64 = 0x1AF0; // 2dup  (two_dup)
+pub(crate) const USER_WF66_VOC_2DROP:  u64 = 0x1AF8; // 2drop (two_drop)
+pub(crate) const USER_WF66_VOC_2SWAP:  u64 = 0x1B00; // 2swap (two_swap)
+pub(crate) const USER_WF66_VOC_2OVER:  u64 = 0x1B08; // 2over (two_over)
+pub(crate) const USER_WF66_VOC_2NIP:   u64 = 0x1B10; // 2nip  (two_nip)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1847,6 +1855,23 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_REPEAT, wf66_repeat);
         session.write_user_u64(USER_WF66_VOC_ZEQ, wf66_zeq);
         session.write_user_u64(USER_WF66_VOC_ZLT, wf66_zlt);
+        // Double / triple stack shuffles.
+        let wf66_tuck = session.jit.lookup_addr("tuck_").context("wf66 vocab tuck_")?;
+        let wf66_rot = session.jit.lookup_addr("rot_").context("wf66 vocab rot_")?;
+        let wf66_negrot = session.jit.lookup_addr("neg_rot").context("wf66 vocab neg_rot")?;
+        let wf66_2dup = session.jit.lookup_addr("two_dup").context("wf66 vocab two_dup")?;
+        let wf66_2drop = session.jit.lookup_addr("two_drop").context("wf66 vocab two_drop")?;
+        let wf66_2swap = session.jit.lookup_addr("two_swap").context("wf66 vocab two_swap")?;
+        let wf66_2over = session.jit.lookup_addr("two_over").context("wf66 vocab two_over")?;
+        let wf66_2nip = session.jit.lookup_addr("two_nip").context("wf66 vocab two_nip")?;
+        session.write_user_u64(USER_WF66_VOC_TUCK, wf66_tuck);
+        session.write_user_u64(USER_WF66_VOC_ROT, wf66_rot);
+        session.write_user_u64(USER_WF66_VOC_NEGROT, wf66_negrot);
+        session.write_user_u64(USER_WF66_VOC_2DUP, wf66_2dup);
+        session.write_user_u64(USER_WF66_VOC_2DROP, wf66_2drop);
+        session.write_user_u64(USER_WF66_VOC_2SWAP, wf66_2swap);
+        session.write_user_u64(USER_WF66_VOC_2OVER, wf66_2over);
+        session.write_user_u64(USER_WF66_VOC_2NIP, wf66_2nip);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

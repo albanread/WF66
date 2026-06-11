@@ -929,6 +929,14 @@ fn wf66_stackop_of(up: u64, xt: u64) -> Option<crate::wf66::StackOp> {
         x if x == r(crate::USER_WF66_VOC_SWAP) => Some(StackOp::Swap),
         x if x == r(crate::USER_WF66_VOC_OVER) => Some(StackOp::Over),
         x if x == r(crate::USER_WF66_VOC_NIP) => Some(StackOp::Nip),
+        x if x == r(crate::USER_WF66_VOC_TUCK) => Some(StackOp::Tuck),
+        x if x == r(crate::USER_WF66_VOC_ROT) => Some(StackOp::Rot),
+        x if x == r(crate::USER_WF66_VOC_NEGROT) => Some(StackOp::NegRot),
+        x if x == r(crate::USER_WF66_VOC_2DUP) => Some(StackOp::TwoDup),
+        x if x == r(crate::USER_WF66_VOC_2DROP) => Some(StackOp::TwoDrop),
+        x if x == r(crate::USER_WF66_VOC_2SWAP) => Some(StackOp::TwoSwap),
+        x if x == r(crate::USER_WF66_VOC_2OVER) => Some(StackOp::TwoOver),
+        x if x == r(crate::USER_WF66_VOC_2NIP) => Some(StackOp::TwoNip),
         _ => None,
     }
 }

@@ -87,6 +87,14 @@ pub enum StackOp {
     Swap,
     Over,
     Nip,
+    Tuck,    // ( a b -- b a b )
+    Rot,     // ( a b c -- b c a )
+    NegRot,  // ( a b c -- c a b )  (-rot)
+    TwoDup,  // ( a b -- a b a b )
+    TwoDrop, // ( a b -- )
+    TwoSwap, // ( a b c d -- c d a b )
+    TwoOver, // ( a b c d -- a b c d a b )
+    TwoNip,  // ( a b c d -- c d )
 }
 
 impl StackOp {
@@ -119,6 +127,66 @@ impl StackOp {
             // ( a b -- b )
             StackOp::Nip => {
                 out.push_str(&format!("    add rbp, {CELL}\n"));
+            }
+            // ( a b -- b a b ) : insert a copy of TOS under NOS
+            StackOp::Tuck => {
+                out.push_str("    mov rcx, [rbp]\n"); // a
+                out.push_str("    mov [rbp], rax\n"); // becomes NNOS = b
+                out.push_str(&format!("    mov [rbp - {CELL}], rcx\n")); // new NOS = a
+                out.push_str(&format!("    sub rbp, {CELL}\n"));
+            }
+            // ( a b c -- b c a ) : a=[rbp+8], b=[rbp], c=rax
+            StackOp::Rot => {
+                out.push_str(&format!("    mov rcx, [rbp + {CELL}]\n")); // a
+                out.push_str("    mov rdx, [rbp]\n"); // b
+                out.push_str(&format!("    mov [rbp + {CELL}], rdx\n")); // NNOS = b
+                out.push_str("    mov [rbp], rax\n"); // NOS = c
+                out.push_str("    mov rax, rcx\n"); // TOS = a
+            }
+            // ( a b c -- c a b )
+            StackOp::NegRot => {
+                out.push_str("    mov rcx, [rbp]\n"); // b
+                out.push_str(&format!("    mov rdx, [rbp + {CELL}]\n")); // a
+                out.push_str(&format!("    mov [rbp + {CELL}], rax\n")); // NNOS = c
+                out.push_str("    mov [rbp], rdx\n"); // NOS = a
+                out.push_str("    mov rax, rcx\n"); // TOS = b
+            }
+            // ( a b -- a b a b )
+            StackOp::TwoDup => {
+                out.push_str("    mov rcx, [rbp]\n"); // a
+                out.push_str(&format!("    mov [rbp - {CELL}], rax\n")); // b
+                out.push_str(&format!("    mov [rbp - {}], rcx\n", 2 * CELL)); // a
+                out.push_str(&format!("    sub rbp, {}\n", 2 * CELL));
+            }
+            // ( a b -- )
+            StackOp::TwoDrop => {
+                out.push_str(&format!("    mov rax, [rbp + {CELL}]\n")); // new TOS = NNOS
+                out.push_str(&format!("    add rbp, {}\n", 2 * CELL));
+            }
+            // ( a b c d -- c d a b ) : swap rax<->[rbp+8] and [rbp]<->[rbp+16]
+            StackOp::TwoSwap => {
+                out.push_str(&format!("    mov rcx, [rbp + {CELL}]\n"));
+                out.push_str(&format!("    mov [rbp + {CELL}], rax\n"));
+                out.push_str("    mov rax, rcx\n");
+                out.push_str("    mov rcx, [rbp]\n");
+                out.push_str(&format!("    mov rdx, [rbp + {}]\n", 2 * CELL));
+                out.push_str("    mov [rbp], rdx\n");
+                out.push_str(&format!("    mov [rbp + {}], rcx\n", 2 * CELL));
+            }
+            // ( a b c d -- a b c d a b )
+            StackOp::TwoOver => {
+                out.push_str(&format!("    mov rcx, [rbp + {}]\n", 2 * CELL)); // a
+                out.push_str(&format!("    mov rdx, [rbp + {CELL}]\n")); // b
+                out.push_str(&format!("    mov [rbp - {CELL}], rax\n")); // d
+                out.push_str(&format!("    mov [rbp - {}], rcx\n", 2 * CELL)); // a
+                out.push_str("    mov rax, rdx\n"); // TOS = b
+                out.push_str(&format!("    sub rbp, {}\n", 2 * CELL));
+            }
+            // ( a b c d -- c d ) : drop the 2nd pair, keep top pair
+            StackOp::TwoNip => {
+                out.push_str("    mov rcx, [rbp]\n"); // c
+                out.push_str(&format!("    add rbp, {}\n", 2 * CELL));
+                out.push_str("    mov [rbp], rcx\n"); // new NOS = c
             }
         }
     }
@@ -1214,6 +1282,14 @@ mod tests {
             StackOp::Swap,
             StackOp::Over,
             StackOp::Nip,
+            StackOp::Tuck,
+            StackOp::Rot,
+            StackOp::NegRot,
+            StackOp::TwoDup,
+            StackOp::TwoDrop,
+            StackOp::TwoSwap,
+            StackOp::TwoOver,
+            StackOp::TwoNip,
         ] {
             let asm = lower(&[Token::Stack(op)], "wf66_t_stk").unwrap();
             wfasm::rasm::assemble(&asm)

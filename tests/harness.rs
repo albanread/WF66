@@ -583,7 +583,13 @@ fn wf66_differential_fuzzer() {
                 kinds.extend_from_slice(&[1, 2, 3, 4]); // unary net0, dup, drop, balanced-if
             }
             if depth >= 2 {
-                kinds.extend_from_slice(&[5, 6, 7]); // binary -1, over(+1), swap/nip
+                kinds.extend_from_slice(&[5, 6, 7, 8, 9, 10]); // binary, over, swap/nip, tuck, 2dup, 2drop
+            }
+            if depth >= 3 {
+                kinds.extend_from_slice(&[11, 12]); // rot, -rot
+            }
+            if depth >= 4 {
+                kinds.extend_from_slice(&[13, 14, 15]); // 2swap, 2over, 2nip
             }
             let k = kinds[(next(rng) % kinds.len() as u64) as usize];
             match k {
@@ -622,6 +628,29 @@ fn wf66_differential_fuzzer() {
                         depth -= 1;
                     }
                 }
+                8 => {
+                    out.push("tuck".into());
+                    depth += 1;
+                }
+                9 => {
+                    out.push("2dup".into());
+                    depth += 2;
+                }
+                10 => {
+                    out.push("2drop".into());
+                    depth -= 2;
+                }
+                11 => out.push("rot".into()),
+                12 => out.push("-rot".into()),
+                13 => out.push("2swap".into()),
+                14 => {
+                    out.push("2over".into());
+                    depth += 2;
+                }
+                15 => {
+                    out.push("2nip".into());
+                    depth -= 2;
+                }
                 _ => {}
             }
         }
@@ -638,7 +667,7 @@ fn wf66_differential_fuzzer() {
 
     let mut rng: u64 = 0x9e3779b97f4a7c15;
     for i in 0..600 {
-        let n_inputs = 1 + (next(&mut rng) % 3) as usize; // 1..3 inputs
+        let n_inputs = 1 + (next(&mut rng) % 4) as usize; // 1..4 inputs
         let body = gen_body(&mut rng, n_inputs);
         let inputs: Vec<String> = (0..n_inputs)
             .map(|_| ((next(&mut rng) % 401) as i64 - 200).to_string())
@@ -654,6 +683,36 @@ fn wf66_differential_fuzzer() {
             s.eval(&src).unwrap()
         };
         assert_eq!(eager, wf66, "fuzz #{i} diverged:\n{src}");
+    }
+}
+
+#[test]
+fn wf66_multicell_shuffles_match_eager_oracle() {
+    // Double / triple stack ops now compile through WF66 (settle-everywhere).
+    let cases = [
+        (": w tuck ;", "7 9 w . . ."),                  // 7 9 -> 9 7 9
+        (": w rot ;", "1 2 3 w . . ."),                 // 1 2 3 -> 2 3 1
+        (": w -rot ;", "1 2 3 w . . ."),                // 1 2 3 -> 3 1 2
+        (": w 2dup ;", "4 5 w . . . ."),                // 4 5 -> 4 5 4 5
+        (": w 2drop ;", "1 4 5 w ."),                   // 1 4 5 -> 1
+        (": w 2swap ;", "1 2 3 4 w . . . ."),           // 1 2 3 4 -> 3 4 1 2
+        (": w 2over ;", "1 2 3 4 w . . . . . ."),       // -> 1 2 3 4 1 2
+        (": w 2nip ;", "1 2 3 4 w . ."),                // 1 2 3 4 -> 3 4
+        (": w rot rot ;", "1 2 3 w . . ."),             // identity-ish (rot^2 = -rot)
+        (": w 2dup + ;", "6 7 w . . ."),                // 6 7 -> 6 13
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
     }
 }
 
