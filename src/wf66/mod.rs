@@ -1577,6 +1577,115 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "diagnostic: cargo test -- --ignored --nocapture wf66_before_after_asm"]
+    fn wf66_before_after_asm() {
+        // Before/after for longer words: the settle-everywhere lowering of the
+        // RAW captured tokens (what the eager path emits per-token) vs the full
+        // WF66 pipeline (token-reduce -> lower -> coalesce -> window-fuse).
+        use CmpOp as C;
+        use Ctl as K;
+        use Fop::*;
+        use StackOp::*;
+        let cases: &[(&str, &str, Vec<Token>)] = &[
+            (
+                "poly",
+                "( x -- 3x^2+2x+7 )   dup dup * 3 * swap 2 * + 7 +",
+                vec![
+                    Token::Stack(Dup),
+                    Token::Stack(Dup),
+                    Token::Inline(Mul),
+                    Token::Lit(3),
+                    Token::Inline(Mul),
+                    Token::Stack(Swap),
+                    Token::Lit(2),
+                    Token::Inline(Mul),
+                    Token::Inline(Add),
+                    Token::Lit(7),
+                    Token::Inline(Add),
+                ],
+            ),
+            (
+                "sumsq",
+                "( a b -- a*a+b*b )   dup * swap dup * +",
+                vec![
+                    Token::Stack(Dup),
+                    Token::Inline(Mul),
+                    Token::Stack(Swap),
+                    Token::Stack(Dup),
+                    Token::Inline(Mul),
+                    Token::Inline(Add),
+                ],
+            ),
+            (
+                "clamp0",
+                "( n -- n|0 )   dup 0< if drop 0 then",
+                vec![
+                    Token::Stack(Dup),
+                    Token::Cmp(C::ZeroLt),
+                    Token::Ctl(K::If),
+                    Token::Stack(Drop),
+                    Token::Lit(0),
+                    Token::Ctl(K::Then),
+                ],
+            ),
+            (
+                "countdown",
+                "( n -- )   begin 1 - dup 0= until drop",
+                vec![
+                    Token::Ctl(K::Begin),
+                    Token::Lit(1),
+                    Token::Inline(Sub),
+                    Token::Stack(Dup),
+                    Token::Cmp(C::ZeroEq),
+                    Token::Ctl(K::Until),
+                    Token::Stack(Drop),
+                ],
+            ),
+            (
+                "rot rot",
+                "( a b c -- c a b )   == -rot",
+                vec![Token::Stack(Rot), Token::Stack(Rot)],
+            ),
+        ];
+
+        fn body(asm: &str) -> Vec<String> {
+            asm.lines()
+                .map(|l| l.trim())
+                .filter(|t| {
+                    !(t.starts_with('.') || t.ends_with(':') || *t == "ret" || t.is_empty())
+                })
+                .map(|t| t.to_string())
+                .collect()
+        }
+        let mem = |ls: &[String]| ls.iter().filter(|l| l.contains("[rbp")).count();
+
+        for (name, eff, toks) in cases {
+            let before = body(&lower(toks, "w").unwrap());
+            let after = body(&render(&window_fuse(coalesce_dsp(parse_instrs(
+                &lower(&reduce(toks), "w").unwrap(),
+            )))));
+            eprintln!("\n== {name}   {eff}");
+            eprintln!(
+                "   BEFORE  {} instrs, {} stack mem-accesses",
+                before.len(),
+                mem(&before)
+            );
+            for l in &before {
+                eprintln!("       {l}");
+            }
+            eprintln!(
+                "   AFTER   {} instrs, {} stack mem-accesses",
+                after.len(),
+                mem(&after)
+            );
+            for l in &after {
+                eprintln!("       {l}");
+            }
+        }
+        eprintln!();
+    }
+
+    #[test]
     #[ignore = "diagnostic: run with --ignored --nocapture to inspect 2.4 headroom"]
     fn wf66_traffic_probe() {
         // Diagnostic: the current optimized body for a few shuffle-chains, with
