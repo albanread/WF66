@@ -848,6 +848,7 @@ pub(crate) const USER_WF66_VOC_LE:  u64 = 0x1B48; // <=   (less_equal)
 pub(crate) const USER_WF66_VOC_GE:  u64 = 0x1B50; // >=   (greater_equal)
 pub(crate) const USER_WF66_VOC_ULT: u64 = 0x1B58; // u<   (u_less)
 pub(crate) const USER_WF66_VOC_UGT: u64 = 0x1B60; // u>   (u_greater)
+pub(crate) const USER_WF66_VOC_PICK: u64 = 0x1B68; // pick (constant index only)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1903,6 +1904,8 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_GE, wf66_ge);
         session.write_user_u64(USER_WF66_VOC_ULT, wf66_ult);
         session.write_user_u64(USER_WF66_VOC_UGT, wf66_ugt);
+        let wf66_pick = session.jit.lookup_addr("pick").context("wf66 vocab pick")?;
+        session.write_user_u64(USER_WF66_VOC_PICK, wf66_pick);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

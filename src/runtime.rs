@@ -1046,6 +1046,11 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
                 eprintln!("[wf66] word xt={xt:#x} -> {cmp:?}");
             }
             b.cmp(cmp);
+        } else if xt == unsafe { *((up + crate::USER_WF66_VOC_PICK) as *const u64) } {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> PickWord");
+            }
+            b.pick_word();
         } else if let Some((k, f)) = wf66_litop_of(up, xt) {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> Lit({k}) {f:?}");

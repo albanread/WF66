@@ -373,6 +373,14 @@ pub enum Token {
     /// comparison's operand directly, with no materialized boolean. The fused
     /// `Ctl` is always one of If/Until/While.
     CmpCtl(CmpOp, Ctl),
+    /// A captured `pick` whose index isn't yet known to be constant. Only a
+    /// constant `<lit> pick` is optimizable; this token is NOT deferrable, so a
+    /// runtime pick falls back to the kernel's `pick`.
+    PickWord,
+    /// A constant `n pick` (n>=2): copy the n-th data-stack cell to TOS. (0/1
+    /// pick reduce to dup/over.) Lowers to a single load — faster than runtime
+    /// pick and than the deep shuffles written to avoid it.
+    Pick(u32),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -417,6 +425,10 @@ impl IrBuilder {
 
     pub fn cmp(&mut self, op: CmpOp) {
         self.tokens.push(Token::Cmp(op));
+    }
+
+    pub fn pick_word(&mut self) {
+        self.tokens.push(Token::PickWord);
     }
 
     /// Splice a callee's token body into the current definition (Phase 3
@@ -659,7 +671,16 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             Token::Cmp(op) => op.emit(&mut s),
             Token::CmpCtl(c, cc) => emit_cmp_ctl(c, cc, &mut s, &mut ctl, &mut ctl_id)?,
             Token::Ctl(c) => emit_ctl(c, &mut s, &mut ctl, &mut ctl_id)?,
-            Token::Word { .. } | Token::Opaque => return Err(LowerError::Unsupported(t)),
+            // constant pick (n>=2): copy the n-th cell to TOS.
+            Token::Pick(k) => {
+                let off = (k as i64 - 1) * CELL;
+                s.push_str(&format!("    mov [rbp - {CELL}], rax\n"));
+                s.push_str(&format!("    mov rax, [rbp + {off}]\n"));
+                s.push_str(&format!("    sub rbp, {CELL}\n"));
+            }
+            Token::PickWord | Token::Word { .. } | Token::Opaque => {
+                return Err(LowerError::Unsupported(t))
+            }
         }
     }
 
@@ -833,7 +854,7 @@ fn combine_imm(op: Fop, a: i64, b: i64) -> Option<i64> {
 /// (0, 1, or 2 tokens) or `None` if no rule applies.
 fn reduce_pair(a: Token, b: Token) -> Option<Vec<Token>> {
     use StackOp::{Drop, Dup, Over, Swap};
-    use Token::{Cmp, DupOp, ImmOp, Inline, Lit, Stack};
+    use Token::{Cmp, DupOp, ImmOp, Inline, Lit, Pick, PickWord, Stack};
     Some(match (a, b) {
         // DCE: a side-effect-free producer then drop -> nothing
         (Lit(_) | Stack(Dup) | Stack(Over), Stack(Drop)) => vec![],
@@ -845,6 +866,10 @@ fn reduce_pair(a: Token, b: Token) -> Option<Vec<Token>> {
         (Stack(Swap), Stack(Swap)) => vec![],                    // swap swap = identity
         // literal-zero comparison -> unary zero form (then fuses with if/until)
         (Lit(0), Cmp(c)) if c.zero_form().is_some() => vec![Cmp(c.zero_form().unwrap())],
+        // constant pick -> direct cell copy (0/1 pick are just dup/over)
+        (Lit(0), PickWord) => vec![Stack(StackOp::Dup)],
+        (Lit(1), PickWord) => vec![Stack(StackOp::Over)],
+        (Lit(k), PickWord) if k >= 2 && fits_i32((k - 1) * CELL) => vec![Pick(k as u32)],
         // literal folded into an op -> register-immediate op
         (Lit(k), Inline(op)) if fits_i32(k) => vec![ImmOp { op, k }],
         // dup + binary op -> self-combining op (a+a, a*a, ...)
@@ -930,6 +955,7 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::Ctl(_)
                 | Token::Cmp(_)
                 | Token::CmpCtl(_, _)
+                | Token::Pick(_)
         )
     })
 }
@@ -1174,6 +1200,38 @@ mod tests {
                 Token::Ctl(Ctl::Then),
             ]
         );
+    }
+
+    #[test]
+    fn reduce_constant_pick() {
+        // 0/1 pick -> dup/over ; 2 pick -> Pick(2) ; runtime pick stays PickWord
+        assert_eq!(
+            reduce(&[Token::Lit(0), Token::PickWord]),
+            vec![Token::Stack(StackOp::Dup)]
+        );
+        assert_eq!(
+            reduce(&[Token::Lit(1), Token::PickWord]),
+            vec![Token::Stack(StackOp::Over)]
+        );
+        assert_eq!(
+            reduce(&[Token::Lit(2), Token::PickWord]),
+            vec![Token::Pick(2)]
+        );
+        // folded index: 1 1 + pick -> 2 pick -> Pick(2)
+        assert_eq!(
+            reduce(&[
+                Token::Lit(1),
+                Token::Lit(1),
+                Token::Inline(Fop::Add),
+                Token::PickWord
+            ]),
+            vec![Token::Pick(2)]
+        );
+        // runtime pick (no preceding literal) is not deferrable
+        assert!(!is_deferrable(&[Token::PickWord]));
+        // Pick(k) assembles
+        let asm = lower(&[Token::Pick(3)], "wf66_t_pick").unwrap();
+        wfasm::rasm::assemble(&asm).unwrap_or_else(|e| panic!("pick: {e:#}\n{asm}"));
     }
 
     #[test]

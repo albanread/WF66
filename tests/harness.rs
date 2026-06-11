@@ -592,6 +592,32 @@ fn wf66_idioms_match_eager_oracle() {
 }
 
 #[test]
+fn wf66_constant_pick_matches_eager_oracle() {
+    // Constant (and folded) n pick -> direct cell copy; runtime pick falls back.
+    let cases = [
+        (": w 0 pick ;", "7 w . ."),           // dup -> 7 7
+        (": w 1 pick ;", "3 7 w . . ."),       // over -> 3 7 3
+        (": w 2 pick ;", "1 2 3 w . . . ."),   // copy 3rd -> 1 2 3 1
+        (": w 3 pick ;", "1 2 3 4 w . . . . ."),
+        (": w 1 1 + pick ;", "1 2 3 4 w . . . . ."), // folded -> 2 pick
+        (": w over 2 pick + ;", "10 20 w . . ."),    // mixed with arithmetic
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
 fn wf66_control_flow_actually_rewrites() {
     // Confirm a control-flow definition genuinely goes through WF66 (the body
     // contains a Jcc/jmp from our lowering and differs from the eager body).
@@ -645,7 +671,7 @@ fn wf66_differential_fuzzer() {
             // build the candidate set valid at the current depth
             let mut kinds: Vec<u8> = vec![0]; // 0 = push literal (always valid)
             if depth >= 1 {
-                kinds.extend_from_slice(&[1, 2, 3, 4]); // unary net0, dup, drop, balanced-if
+                kinds.extend_from_slice(&[1, 2, 3, 4, 18]); // unary net0, dup, drop, balanced-if, pick
             }
             if depth >= 2 {
                 kinds.extend_from_slice(&[5, 6, 7, 8, 9, 10, 16, 17]); // +binary-cmp, +fused-cmp-if
@@ -726,6 +752,12 @@ fn wf66_differential_fuzzer() {
                     let cmp = pick(rng, &["=", "<>", "<", ">", "<=", ">=", "u<", "u>"]);
                     let op = pick(rng, &net0);
                     out.push(format!("2dup {cmp} if {op} then"));
+                }
+                18 => {
+                    // constant pick: copy the k-th item (0..depth-1) to TOS
+                    let k = next(rng) % depth as u64;
+                    out.push(format!("{k} pick"));
+                    depth += 1;
                 }
                 _ => {}
             }
