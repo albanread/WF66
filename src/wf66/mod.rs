@@ -234,6 +234,11 @@ pub enum Token {
     Ctl(Ctl),
     /// A flag-producing comparison (Phase 4a).
     Cmp(CmpOp),
+    /// A comparison immediately consumed by a flag-testing control word
+    /// (`IF`/`UNTIL`/`WHILE`) — compare→branch fusion. Branches off the
+    /// comparison's operand directly, with no materialized boolean. The fused
+    /// `Ctl` is always one of If/Until/While.
+    CmpCtl(CmpOp, Ctl),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -417,6 +422,23 @@ pub fn fold_imm_ops(tokens: &[Token]) -> Vec<Token> {
     out
 }
 
+/// Load an immediate into `rax` with the smallest correct encoding (mirrors
+/// WF65's literal emit): 0 -> `xor eax,eax` (2B); 1..=u32::MAX -> `mov eax,imm`
+/// (5B, zero-extended); other i32 (small negatives) -> `mov rax,imm` (7B,
+/// sign-extended); otherwise `movabs rax,imm64` (10B). Replaces the previous
+/// always-`movabs`, which inflated every folded constant.
+fn emit_load_imm(v: i64, out: &mut String) {
+    if v == 0 {
+        out.push_str("    xor eax, eax\n");
+    } else if (1..=0xFFFF_FFFF).contains(&v) {
+        out.push_str(&format!("    mov eax, {v}\n"));
+    } else if i32::try_from(v).is_ok() {
+        out.push_str(&format!("    mov rax, {v}\n"));
+    } else {
+        out.push_str(&format!("    movabs rax, {v}\n"));
+    }
+}
+
 /// Fuse `dup` followed by a binary op into a single self-combining instruction
 /// (`[Stack(Dup), Inline(op)]` -> `DupOp(op)`). Matches WF65's dup-fuse so a
 /// shuffle+op no longer regresses vs eager under settle-everywhere lowering.
@@ -489,10 +511,10 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     for &t in tokens {
         match t {
             Token::Lit(v) => {
-                // Push: spill old TOS to the cell below NOS, load the new TOS,
-                // commit the push by lowering DSP.
+                // Push: spill old TOS to the cell below NOS, load the new TOS
+                // (smallest correct encoding), commit the push by lowering DSP.
                 s.push_str(&format!("    mov [rbp - {CELL}], rax\n"));
-                s.push_str(&format!("    movabs rax, {v}\n"));
+                emit_load_imm(v, &mut s);
                 s.push_str(&format!("    sub rbp, {CELL}\n"));
             }
             Token::Inline(op) => op.emit_bare(&mut s),
@@ -501,6 +523,7 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             Token::Stack(op) => op.emit(&mut s),
             Token::Mem(op) => op.emit(&mut s),
             Token::Cmp(op) => op.emit(&mut s),
+            Token::CmpCtl(c, cc) => emit_cmp_ctl(c, cc, &mut s, &mut ctl, &mut ctl_id)?,
             Token::Ctl(c) => emit_ctl(c, &mut s, &mut ctl, &mut ctl_id)?,
             Token::Word { .. } | Token::Opaque => return Err(LowerError::Unsupported(t)),
         }
@@ -520,6 +543,64 @@ fn emit_consume_flag(out: &mut String) {
     out.push_str("    mov rax, [rbp]\n"); // new TOS = NOS
     out.push_str(&format!("    add rbp, {CELL}\n")); // drop flag cell
     out.push_str("    test rcx, rcx\n");
+}
+
+/// Compare→branch fusion: a comparison (`Cmp`) immediately consumed by a
+/// flag-testing control word (`IF`/`UNTIL`/`WHILE`) fuses to `CmpCtl`, so the
+/// branch tests the comparison's operand directly with no materialized boolean.
+pub fn fold_cmp_branch(tokens: &[Token]) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    for &t in tokens {
+        if let Token::Ctl(ctl @ (Ctl::If | Ctl::Until | Ctl::While)) = t {
+            if let Some(&Token::Cmp(c)) = out.last() {
+                out.pop();
+                out.push(Token::CmpCtl(c, ctl));
+                continue;
+            }
+        }
+        out.push(t);
+    }
+    out
+}
+
+/// Lower a fused compare→branch. Consume the comparison's operand, test it, and
+/// branch with the *inverted* condition (the control word branches when the flag
+/// would be FALSE): `0=` -> `jnz`, `0<` -> `jns`. No boolean is materialized.
+fn emit_cmp_ctl(
+    c: CmpOp,
+    ctl: Ctl,
+    out: &mut String,
+    stack: &mut Vec<CtlFrame>,
+    next_id: &mut u32,
+) -> Result<(), LowerError> {
+    emit_consume_flag(out); // here the "flag" is really the comparison operand
+    let jcc = match c {
+        CmpOp::ZeroEq => "jnz", // flag=(op==0); branch when op!=0
+        CmpOp::ZeroLt => "jns", // flag=(op<0);  branch when op>=0
+    };
+    match ctl {
+        Ctl::If => {
+            let id = *next_id;
+            *next_id += 1;
+            out.push_str(&format!("    {jcc} .wf66_c{id}_f\n"));
+            stack.push(CtlFrame::If { id, has_else: false });
+        }
+        Ctl::Until => match stack.pop() {
+            Some(CtlFrame::Begin { id }) => {
+                out.push_str(&format!("    {jcc} .wf66_c{id}_top\n"));
+            }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
+        Ctl::While => match stack.last() {
+            Some(CtlFrame::Begin { id }) => {
+                let id = *id;
+                out.push_str(&format!("    {jcc} .wf66_c{id}_exit\n"));
+            }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
+        _ => return Err(LowerError::UnbalancedControl),
+    }
+    Ok(())
 }
 
 /// Lower a structured control marker against the control stack, emitting rasm
@@ -601,7 +682,8 @@ pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, Low
     let pruned = dce(&folded);
     let scheduled = fold_imm_ops(&pruned);
     let fused = fold_dup_op(&scheduled);
-    lower(&fused, fn_name)
+    let branched = fold_cmp_branch(&fused);
+    lower(&branched, fn_name)
 }
 
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
@@ -620,6 +702,7 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::Mem(_)
                 | Token::Ctl(_)
                 | Token::Cmp(_)
+                | Token::CmpCtl(_, _)
         )
     })
 }
@@ -735,7 +818,7 @@ mod tests {
             asm,
             "    .intel_syntax noprefix\n    .text\n    .globl wf66_t_const\n\
              wf66_t_const:\n\
-             \x20   mov [rbp - 8], rax\n    movabs rax, 12\n    sub rbp, 8\n\
+             \x20   mov [rbp - 8], rax\n    mov eax, 12\n    sub rbp, 8\n\
              \x20   ret\n"
         );
     }
@@ -940,6 +1023,35 @@ mod tests {
         .unwrap();
         wfasm::rasm::assemble(&asm)
             .unwrap_or_else(|e| panic!("nested if rejected: {e:#}\nasm:\n{asm}"));
+    }
+
+    #[test]
+    fn cmp_branch_fuses_and_assembles() {
+        // 0= if  ->  CmpCtl(ZeroEq, If); same for until/while.
+        assert_eq!(
+            fold_cmp_branch(&[Token::Cmp(CmpOp::ZeroEq), Token::Ctl(Ctl::If)]),
+            vec![Token::CmpCtl(CmpOp::ZeroEq, Ctl::If)]
+        );
+        // a comparison NOT followed by a flag-consumer is left alone
+        assert_eq!(
+            fold_cmp_branch(&[Token::Cmp(CmpOp::ZeroLt), Token::Ctl(Ctl::Then)]),
+            vec![Token::Cmp(CmpOp::ZeroLt), Token::Ctl(Ctl::Then)]
+        );
+        // fused forms assemble (with their control frames)
+        for c in [CmpOp::ZeroEq, CmpOp::ZeroLt] {
+            let ifd = lower(
+                &[Token::CmpCtl(c, Ctl::If), Token::Lit(1), Token::Ctl(Ctl::Then)],
+                "wf66_t_cbif",
+            )
+            .unwrap();
+            wfasm::rasm::assemble(&ifd).unwrap_or_else(|e| panic!("{c:?} if: {e:#}\n{ifd}"));
+            let utl = lower(
+                &[Token::Ctl(Ctl::Begin), Token::CmpCtl(c, Ctl::Until)],
+                "wf66_t_cbu",
+            )
+            .unwrap();
+            wfasm::rasm::assemble(&utl).unwrap_or_else(|e| panic!("{c:?} until: {e:#}\n{utl}"));
+        }
     }
 
     #[test]
