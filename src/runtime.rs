@@ -965,6 +965,7 @@ fn wf66_ctl_of(up: u64, xt: u64) -> Option<crate::wf66::Ctl> {
         x if x == r(crate::USER_WF66_VOC_AGAIN) => Some(Ctl::Again),
         x if x == r(crate::USER_WF66_VOC_WHILE) => Some(Ctl::While),
         x if x == r(crate::USER_WF66_VOC_REPEAT) => Some(Ctl::Repeat),
+        x if x == r(crate::USER_WF66_VOC_EXIT) => Some(Ctl::Exit),
         _ => None,
     }
 }

@@ -242,6 +242,7 @@ pub enum Ctl {
     Again,
     While,
     Repeat,
+    Exit, // early return ( -- )
 }
 
 /// A flag-producing comparison (Phase 4a). Forth flags are all-bits 0 / -1.
@@ -830,6 +831,8 @@ fn emit_ctl(
             }
             _ => return Err(LowerError::UnbalancedControl),
         },
+        // early return; the fall-through path keeps going (and gets the final ret)
+        Ctl::Exit => out.push_str("    ret\n"),
     }
     Ok(())
 }

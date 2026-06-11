@@ -618,6 +618,30 @@ fn wf66_constant_pick_matches_eager_oracle() {
 }
 
 #[test]
+fn wf66_exit_matches_eager_oracle() {
+    // `exit` (early return) compiles to `ret`; defs with it stop tainting.
+    let cases = [
+        (": w 1 exit ;", "w ."),                                // -> 1
+        (": w dup 0< if drop 0 exit then ;", "-5 w .\n7 w ."),  // max(n,0): 0, 7
+        (": w dup 5 > if drop 5 exit then ;", "9 w .\n3 w ."),  // min(n,5): 5, 3
+        (": w dup 0> if drop 1 exit then 0< if -1 else 0 then ;", "8 w .\n-8 w .\n0 w ."), // sgn
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
 fn wf66_control_flow_actually_rewrites() {
     // Confirm a control-flow definition genuinely goes through WF66 (the body
     // contains a Jcc/jmp from our lowering and differs from the eager body).
