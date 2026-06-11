@@ -1055,6 +1055,49 @@ fn render(instrs: &[Instr]) -> String {
     s
 }
 
+/// rbp-coalescing (Step 2.3): defer the data-stack-pointer adjusts to the end of
+/// each barrier-free window, rewriting intervening cell displacements by the
+/// running delta. The N interspersed `add/sub rbp` of a shuffle run collapse to a
+/// single adjust at the window edge — or vanish entirely when they cancel. Runs
+/// *before* [`forward_loads`]: removing the interior adjusts turns relative cell
+/// accesses into absolute ones, which exposes more redundant reloads to drop.
+///
+/// Sound because the deferred adjust is *flushed* before every `Raw` barrier, and
+/// every instruction that depends on rbp being at its logical position — a Fop
+/// reading `[rbp]`, a jump, a label, a call, `ret`, the binary-compare
+/// `lea rbp,[rbp+16]` — is a `Raw` line. So nothing ever observes rbp mid-defer;
+/// only the structured cells (whose disp we rewrite) and the adjust itself move.
+/// Displacement bookkeeping: at any access, `flushed + delta` equals the total
+/// adjust seen so far, so `[rbp_phys + (disp + delta)]` is the original address.
+fn coalesce_dsp(instrs: Vec<Instr>) -> Vec<Instr> {
+    let mut out: Vec<Instr> = Vec::with_capacity(instrs.len());
+    let mut delta: i64 = 0; // adjust deferred past the cells rewritten so far
+    for ins in instrs {
+        match ins {
+            Instr::AdjustDsp(n) => delta += n, // defer
+            Instr::LoadCell { dst, disp } => out.push(Instr::LoadCell {
+                dst,
+                disp: disp + delta,
+            }),
+            Instr::StoreCell { disp, src } => out.push(Instr::StoreCell {
+                disp: disp + delta,
+                src,
+            }),
+            Instr::Raw(l) => {
+                if delta != 0 {
+                    out.push(Instr::AdjustDsp(delta));
+                    delta = 0;
+                }
+                out.push(Instr::Raw(l));
+            }
+        }
+    }
+    if delta != 0 {
+        out.push(Instr::AdjustDsp(delta));
+    }
+    out
+}
+
 /// Store->load forwarding (Step 2.2): within a barrier-free window, a `LoadCell`
 /// of a physical data-stack cell whose value is already in a live register is
 /// replaced by a register move — or dropped entirely if it's already in the
@@ -1177,7 +1220,8 @@ pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
     }
     let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
     // Deferred assembly: lex to instruction records, reduce, re-render.
-    let asm = render(&forward_loads(parse_instrs(&asm)));
+    // coalesce rbp adjusts first (absolute disps), then forward store->load.
+    let asm = render(&forward_loads(coalesce_dsp(parse_instrs(&asm))));
     let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
     let fn_off = *module
         .symbols
@@ -1387,6 +1431,116 @@ mod tests {
                 .any(|i| matches!(i, Instr::LoadCell { .. } | Instr::StoreCell { .. })),
             "[rax] program memory must stay Raw: {fetch:?}"
         );
+    }
+
+    // ---- rbp-coalescing (Step 2.3) --------------------------------------
+
+    #[test]
+    fn coalesce_cancels_paired_adjusts() {
+        // push then pop within a window: sub rbp,8 / add rbp,8 cancel; the load's
+        // [rbp] becomes [rbp-8] because rbp never physically moved.
+        let buf = vec![
+            Instr::StoreCell {
+                disp: -8,
+                src: "rax".into(),
+            },
+            Instr::AdjustDsp(-8),
+            Instr::LoadCell {
+                dst: "rax".into(),
+                disp: 0,
+            },
+            Instr::AdjustDsp(8),
+            Instr::Raw("    ret".into()),
+        ];
+        assert_eq!(
+            coalesce_dsp(buf),
+            vec![
+                Instr::StoreCell {
+                    disp: -8,
+                    src: "rax".into()
+                },
+                Instr::LoadCell {
+                    dst: "rax".into(),
+                    disp: -8
+                },
+                Instr::Raw("    ret".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesce_flushes_before_a_raw_barrier() {
+        // a Fop reading [rbp] must see rbp settled: the deferred adjust is emitted
+        // before it, never deferred past it.
+        let buf = vec![
+            Instr::AdjustDsp(-8),
+            Instr::Raw("    add rax, [rbp]".into()),
+        ];
+        assert_eq!(
+            coalesce_dsp(buf),
+            vec![
+                Instr::AdjustDsp(-8),
+                Instr::Raw("    add rax, [rbp]".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesce_merges_a_shuffle_run() {
+        // two adjusts in a structured run collapse to one at the window edge.
+        let buf = vec![
+            Instr::StoreCell {
+                disp: -8,
+                src: "rax".into(),
+            },
+            Instr::AdjustDsp(-8),
+            Instr::StoreCell {
+                disp: -8,
+                src: "rax".into(),
+            },
+            Instr::AdjustDsp(-8),
+            Instr::Raw("    ret".into()),
+        ];
+        assert_eq!(
+            coalesce_dsp(buf),
+            vec![
+                Instr::StoreCell {
+                    disp: -8,
+                    src: "rax".into()
+                },
+                Instr::StoreCell {
+                    disp: -16,
+                    src: "rax".into()
+                },
+                Instr::AdjustDsp(-16),
+                Instr::Raw("    ret".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesce_then_forward_shrinks_dup_over() {
+        // composed: coalesce removes interior adjusts, forward then drops the now-
+        // absolute redundant reload -> fewer instrs and a single rbp adjust.
+        let asm = lower(
+            &[Token::Stack(StackOp::Dup), Token::Stack(StackOp::Over)],
+            "rt",
+        )
+        .unwrap();
+        let base = parse_instrs(&asm);
+        let opt = forward_loads(coalesce_dsp(base.clone()));
+        assert!(
+            opt.len() < base.len(),
+            "coalesce+forward should shrink: {base:?} -> {opt:?}"
+        );
+        assert!(
+            opt.iter()
+                .filter(|i| matches!(i, Instr::AdjustDsp(_)))
+                .count()
+                <= 1,
+            "at most one rbp adjust should remain: {opt:?}"
+        );
+        assert!(wfasm::rasm::assemble(&render(&opt)).is_ok());
     }
 
     // ---- store->load forwarding (Step 2.2) ------------------------------
