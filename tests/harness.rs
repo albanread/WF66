@@ -364,6 +364,66 @@ bye\n";
 }
 
 #[test]
+fn wf66_derived_ops_match_eager_oracle() {
+    // Phase 2.2: 1+ 1- 2* cell+ cells negate invert each capture as a (Lit, Fop)
+    // pair, so the existing passes optimize them (e.g. negate -> neg, 2* -> shl).
+    let cases = [
+        (": inc 1+ ;", "41 inc ."),
+        (": dec 1- ;", "43 dec ."),
+        (": dbl 2* ;", "21 dbl ."),
+        (": cp cell+ ;", "100 cp ."),
+        (": cs cells ;", "5 cs ."),
+        (": neg negate ;", "7 neg ."),
+        (": inv invert ;", "0 inv ."),
+        (": chain 1+ 2* 1- ;", "10 chain ."), // (10+1)*2-1 = 21
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
+fn wf66_folds_through_derived_ops() {
+    // A win eager's one-literal watermark cannot do: a constant pushed then run
+    // through a derived op folds at compile time. `: k 10 1+ ;` -> push 11.
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    let def = ": k 10 1+ ;\nbye\n";
+    let eager = {
+        let mut s = sess();
+        s.eval(def).unwrap();
+        body(&s, "k")
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(def).unwrap();
+        body(&s, "k")
+    };
+    assert_ne!(eager, wf66, "WF66 should fold `10 1+` to a constant, not match eager");
+    // and it still computes 11
+    let mut s = sess();
+    s.set_wf66_enabled(true);
+    assert!(s.eval(": k 10 1+ ;\nk .\nbye\n").unwrap().contains("11"));
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.

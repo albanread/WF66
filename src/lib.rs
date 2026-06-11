@@ -810,6 +810,15 @@ pub(crate) const USER_WF66_VOC_FETCH:  u64 = 0x1A30; // @  (fetch)
 pub(crate) const USER_WF66_VOC_STORE:  u64 = 0x1A38; // !  (store)
 pub(crate) const USER_WF66_VOC_CFETCH: u64 = 0x1A40; // c@ (c_fetch)
 pub(crate) const USER_WF66_VOC_CSTORE: u64 = 0x1A48; // c! (c_store)
+// Derived single-instruction ops, captured as a (Lit, Fop) pair so the existing
+// fold / strength-reduce / DCE passes handle them (and fold through constants).
+pub(crate) const USER_WF66_VOC_INC:    u64 = 0x1A50; // 1+    -> 1 +
+pub(crate) const USER_WF66_VOC_DEC:    u64 = 0x1A58; // 1-    -> 1 -
+pub(crate) const USER_WF66_VOC_2STAR:  u64 = 0x1A60; // 2*    -> 2 *
+pub(crate) const USER_WF66_VOC_CELLP:  u64 = 0x1A68; // cell+ -> 8 +
+pub(crate) const USER_WF66_VOC_CELLS:  u64 = 0x1A70; // cells -> 8 *
+pub(crate) const USER_WF66_VOC_NEGATE: u64 = 0x1A78; // negate-> -1 *  (neg)
+pub(crate) const USER_WF66_VOC_INVERT: u64 = 0x1A80; // invert-> -1 xor (not)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1790,6 +1799,21 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_STORE, wf66_store);
         session.write_user_u64(USER_WF66_VOC_CFETCH, wf66_cfetch);
         session.write_user_u64(USER_WF66_VOC_CSTORE, wf66_cstore);
+        // Derived ops (Lit+Fop expansion).
+        let wf66_inc = session.jit.lookup_addr("one_plus").context("wf66 vocab one_plus")?;
+        let wf66_dec = session.jit.lookup_addr("one_minus").context("wf66 vocab one_minus")?;
+        let wf66_2star = session.jit.lookup_addr("two_times").context("wf66 vocab two_times")?;
+        let wf66_cellp = session.jit.lookup_addr("cell_plus").context("wf66 vocab cell_plus")?;
+        let wf66_cells = session.jit.lookup_addr("cells").context("wf66 vocab cells")?;
+        let wf66_negate = session.jit.lookup_addr("negate").context("wf66 vocab negate")?;
+        let wf66_invert = session.jit.lookup_addr("invert").context("wf66 vocab invert")?;
+        session.write_user_u64(USER_WF66_VOC_INC, wf66_inc);
+        session.write_user_u64(USER_WF66_VOC_DEC, wf66_dec);
+        session.write_user_u64(USER_WF66_VOC_2STAR, wf66_2star);
+        session.write_user_u64(USER_WF66_VOC_CELLP, wf66_cellp);
+        session.write_user_u64(USER_WF66_VOC_CELLS, wf66_cells);
+        session.write_user_u64(USER_WF66_VOC_NEGATE, wf66_negate);
+        session.write_user_u64(USER_WF66_VOC_INVERT, wf66_invert);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {
