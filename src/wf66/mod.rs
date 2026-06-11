@@ -245,6 +245,31 @@ fn fits_i32(k: i64) -> bool {
     i32::try_from(k).is_ok()
 }
 
+/// Dead-code elimination (Phase 1.3): a side-effect-free producer immediately
+/// followed by `drop` cancels — the pushed value is never observed. Covers
+/// `Lit drop`, `dup drop`, and `over drop`. Checking the running output's last
+/// token after each cancellation reaches a fixpoint in one pass (e.g.
+/// `5 dup drop drop` -> nothing). `Inline`/`ImmOp` are *not* pure producers
+/// (they consume operands), so `op drop` is left alone.
+pub fn dce(tokens: &[Token]) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    for &t in tokens {
+        if matches!(t, Token::Stack(StackOp::Drop)) {
+            if matches!(
+                out.last(),
+                Some(Token::Lit(_))
+                    | Some(Token::Stack(StackOp::Dup))
+                    | Some(Token::Stack(StackOp::Over))
+            ) {
+                out.pop();
+                continue;
+            }
+        }
+        out.push(t);
+    }
+    out
+}
+
 /// Fold a `Lit(k)` into a following `Inline(op)` (Phase 1.2). `5 *` becomes
 /// `ImmOp{Mul,5}` — one instruction operating on TOS in place — instead of a
 /// literal push plus a memory-operand op. Runs *after* [`const_fold`], so any
@@ -335,7 +360,8 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
 /// the kernel capture hook lands.
 pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     let folded = const_fold(tokens);
-    let scheduled = fold_imm_ops(&folded);
+    let pruned = dce(&folded);
+    let scheduled = fold_imm_ops(&pruned);
     lower(&scheduled, fn_name)
 }
 
@@ -614,6 +640,40 @@ mod tests {
         assert!(is_deferrable(&[Token::Lit(1), Token::Inline(Fop::Add)]));
         assert!(!is_deferrable(&[Token::Lit(1), Token::Word { xt: 0 }]));
         assert!(!is_deferrable(&[Token::Opaque]));
+    }
+
+    // ---- DCE (Phase 1.3) -----------------------------------------------
+
+    #[test]
+    fn dce_cancels_pure_push_then_drop() {
+        assert_eq!(dce(&[Token::Lit(5), Token::Stack(StackOp::Drop)]), vec![]);
+        assert_eq!(
+            dce(&[Token::Stack(StackOp::Dup), Token::Stack(StackOp::Drop)]),
+            vec![]
+        );
+        assert_eq!(
+            dce(&[Token::Stack(StackOp::Over), Token::Stack(StackOp::Drop)]),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn dce_reaches_fixpoint_in_one_pass() {
+        // 5 dup drop drop -> nothing
+        let ir = [
+            Token::Lit(5),
+            Token::Stack(StackOp::Dup),
+            Token::Stack(StackOp::Drop),
+            Token::Stack(StackOp::Drop),
+        ];
+        assert_eq!(dce(&ir), vec![]);
+    }
+
+    #[test]
+    fn dce_leaves_consuming_op_before_drop() {
+        // 5 + drop consumes the entry value — not removable.
+        let ir = [Token::Lit(5), Token::Inline(Fop::Add), Token::Stack(StackOp::Drop)];
+        assert_eq!(dce(&ir), ir.to_vec());
     }
 
     // ---- stack shuffles (Phase 1.1) ------------------------------------

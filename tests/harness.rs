@@ -311,6 +311,30 @@ fn wf66_actually_rewrites_not_falls_back() {
 }
 
 #[test]
+fn wf66_dce_matches_eager_oracle() {
+    // Phase 1.3: pure-push-then-drop cancels. The words below contain dead
+    // pushes; WF66 elides them, and the result must match eager.
+    let cases = [
+        (": drop5 5 drop ;", "42 drop5 ."),    // 5 drop is dead -> 42
+        (": dd dup drop ;", "7 dd ."),         // dup drop is a no-op -> 7
+        (": deadchain 1 2 + drop ;", "9 deadchain ."), // 1 2 + drop -> 9 (drops the 3)
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.
