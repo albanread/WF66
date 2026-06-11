@@ -557,6 +557,110 @@ fn wf66_control_flow_actually_rewrites() {
 }
 
 #[test]
+fn wf66_differential_fuzzer() {
+    // Random deferrable programs (literals, arithmetic, derived ops, shuffles,
+    // comparisons, balanced conditionals) over random runtime inputs. WF66's
+    // output must equal eager's for every one. Deterministic seed -> reproducible;
+    // a failure prints the exact source. Excludes memory ops (random addresses
+    // fault) and loops (random conditions may not terminate).
+    fn next(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+    fn pick<'a>(rng: &mut u64, xs: &[&'a str]) -> &'a str {
+        xs[(next(rng) % xs.len() as u64) as usize]
+    }
+    // Generate a body that starts at `depth` inputs and ends at depth 1.
+    fn gen_body(rng: &mut u64, mut depth: usize) -> String {
+        let net0 = ["1+", "1-", "2*", "negate", "invert"]; // arity 1, delta 0
+        let mut out: Vec<String> = Vec::new();
+        let steps = 6 + (next(rng) % 16) as usize;
+        for _ in 0..steps {
+            // build the candidate set valid at the current depth
+            let mut kinds: Vec<u8> = vec![0]; // 0 = push literal (always valid)
+            if depth >= 1 {
+                kinds.extend_from_slice(&[1, 2, 3, 4]); // unary net0, dup, drop, balanced-if
+            }
+            if depth >= 2 {
+                kinds.extend_from_slice(&[5, 6, 7]); // binary -1, over(+1), swap/nip
+            }
+            let k = kinds[(next(rng) % kinds.len() as u64) as usize];
+            match k {
+                0 => {
+                    let v = (next(rng) % 2001) as i64 - 1000;
+                    out.push(v.to_string());
+                    depth += 1;
+                }
+                1 => out.push(pick(rng, &net0).to_string()),
+                2 => {
+                    out.push("dup".into());
+                    depth += 1;
+                }
+                3 => {
+                    out.push("drop".into());
+                    depth -= 1;
+                }
+                4 => {
+                    // balanced conditional, net delta 0
+                    let cmp = pick(rng, &["0=", "0<"]);
+                    let body = pick(rng, &net0);
+                    out.push(format!("dup {cmp} if {body} then"));
+                }
+                5 => {
+                    out.push(pick(rng, &["+", "-", "*", "and", "or", "xor"]).to_string());
+                    depth -= 1;
+                }
+                6 => {
+                    out.push("over".into());
+                    depth += 1;
+                }
+                7 => {
+                    let op = pick(rng, &["swap", "nip"]);
+                    out.push(op.to_string());
+                    if op == "nip" {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        while depth > 1 {
+            out.push("+".into());
+            depth -= 1;
+        }
+        while depth < 1 {
+            out.push("0".into());
+            depth += 1;
+        }
+        out.join(" ")
+    }
+
+    let mut rng: u64 = 0x9e3779b97f4a7c15;
+    for i in 0..600 {
+        let n_inputs = 1 + (next(&mut rng) % 3) as usize; // 1..3 inputs
+        let body = gen_body(&mut rng, n_inputs);
+        let inputs: Vec<String> = (0..n_inputs)
+            .map(|_| ((next(&mut rng) % 401) as i64 - 200).to_string())
+            .collect();
+        let src = format!(": fw {body} ;\n{} fw .\nbye\n", inputs.join(" "));
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "fuzz #{i} diverged:\n{src}");
+    }
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.
