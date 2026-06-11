@@ -218,6 +218,63 @@ pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, Low
     lower(&folded, fn_name)
 }
 
+/// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
+/// i.e. WF66 can lower the whole body. Any `Word`/`Opaque` (an unknown word, an
+/// immediate word's emission, a `CODE:` region) makes the span non-deferrable;
+/// the wired `;` then leaves the eager body in place (the settle fallback).
+pub fn is_deferrable(tokens: &[Token]) -> bool {
+    tokens
+        .iter()
+        .all(|t| matches!(t, Token::Lit(_) | Token::Inline(_)))
+}
+
+/// Error from the per-definition finalizer.
+#[derive(Debug)]
+pub enum CompileError {
+    /// The span contains a token outside the Phase 0 subset — the caller must
+    /// keep the eagerly-compiled body (settle-to-canonical fallback).
+    NotDeferrable,
+    /// Lowering rejected a token (should not happen after `is_deferrable`).
+    Lower(LowerError),
+    /// The native assembler rejected the lowered text.
+    Assemble(String),
+    /// The assembled module did not expose the body entry symbol.
+    MissingSymbol,
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileError::NotDeferrable => write!(f, "span is not Phase-0 deferrable"),
+            CompileError::Lower(e) => write!(f, "lower: {e}"),
+            CompileError::Assemble(e) => write!(f, "assemble: {e}"),
+            CompileError::MissingSymbol => write!(f, "assembled module missing body symbol"),
+        }
+    }
+}
+
+/// The finalizer core: fold + lower + assemble a closed, deferrable definition to
+/// **position-independent machine-code bytes** (the body, including the trailing
+/// `ret`). The wired `;` rewinds HERE to the body start and copies these bytes
+/// over the eagerly-compiled body. Returns `NotDeferrable` (cheaply) when the
+/// span is outside the Phase 0 subset, so the caller keeps the eager body.
+///
+/// The bytes are position-independent — Phase 0 lowering uses only `movabs`
+/// immediates and RAX/RBP-relative memory, no RIP-relative or absolute *code*
+/// references — so they run correctly wherever they are copied.
+pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
+    if !is_deferrable(tokens) {
+        return Err(CompileError::NotDeferrable);
+    }
+    let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
+    let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
+    let fn_off = *module
+        .symbols
+        .get("wf66_body")
+        .ok_or(CompileError::MissingSymbol)?;
+    Ok(module.code[fn_off..].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +383,47 @@ mod tests {
             module.symbols.keys().collect::<Vec<_>>()
         );
         assert!(module.externs.is_empty(), "unexpected externs: {:?}", module.externs);
+    }
+
+    // ---- finalizer core (IR -> position-independent body bytes) ---------
+
+    #[test]
+    fn body_bytes_for_folded_constant() {
+        // : twelve 5 7 + ;  -> Lit 12 -> push 12; ret
+        let bytes =
+            compile_body_bytes(&[Token::Lit(5), Token::Lit(7), Token::Inline(Fop::Add)]).unwrap();
+        assert!(!bytes.is_empty());
+        assert!(bytes.contains(&0xC3), "body must contain a ret (0xC3): {bytes:02x?}");
+    }
+
+    #[test]
+    fn body_bytes_for_runtime_expression() {
+        // : bar 5 * 2 + ;  ( n -- n*5+2 ) — lowers, does not fold.
+        let bytes = compile_body_bytes(&[
+            Token::Lit(5),
+            Token::Inline(Fop::Mul),
+            Token::Lit(2),
+            Token::Inline(Fop::Add),
+        ])
+        .unwrap();
+        assert!(!bytes.is_empty());
+        assert!(bytes.contains(&0xC3));
+    }
+
+    #[test]
+    fn body_bytes_refuses_non_deferrable() {
+        // A call to another word is the settle fallback's job, not WF66 Phase 0.
+        assert!(matches!(
+            compile_body_bytes(&[Token::Lit(1), Token::Word { xt: 0x4000 }]),
+            Err(CompileError::NotDeferrable)
+        ));
+    }
+
+    #[test]
+    fn deferrable_classification() {
+        assert!(is_deferrable(&[Token::Lit(1), Token::Inline(Fop::Add)]));
+        assert!(!is_deferrable(&[Token::Lit(1), Token::Word { xt: 0 }]));
+        assert!(!is_deferrable(&[Token::Opaque]));
     }
 
     #[test]

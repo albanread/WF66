@@ -787,6 +787,19 @@ pub(crate) const USER_PIN_VOC_STORE: u64 = 0x19A0;  // ! xt (store)
 pub(crate) const USER_PIN_VOC_PLUS:  u64 = 0x19A8;  // +! xt (plus_store)
 pub(crate) const USER_PIN_VOC_FFETCH:u64 = 0x19B0;  // f@ xt (f_fetch)
 pub(crate) const USER_PIN_VOC_FSTORE:u64 = 0x19B8;  // f! xt (f_store)
+
+// WF66 token-IR capture (docs/design/wf66_charter.md). Free user-area space
+// above the pin vocab. ENABLE gates whether `:` records; REC is 1 while a
+// definition is being shadow-captured; the VOC_* cells hold the xts of the
+// arithmetic primitives the capture hook maps to Fops (written at boot).
+pub(crate) const USER_WF66_ENABLE:  u64 = 0x19C0;
+pub(crate) const USER_WF66_REC:     u64 = 0x19C8;
+pub(crate) const USER_WF66_VOC_ADD: u64 = 0x19D0;  // +   (plus)
+pub(crate) const USER_WF66_VOC_SUB: u64 = 0x19D8;  // -   (minus)
+pub(crate) const USER_WF66_VOC_MUL: u64 = 0x19E0;  // *   (times)
+pub(crate) const USER_WF66_VOC_AND: u64 = 0x19E8;  // and (and_)
+pub(crate) const USER_WF66_VOC_OR:  u64 = 0x19F0;  // or  (or_)
+pub(crate) const USER_WF66_VOC_XOR: u64 = 0x19F8;  // xor (xor_)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1371,6 +1384,11 @@ impl Wf64Session {
                 "rt_to_float"    => Some(runtime::rt_to_float    as *mut c_void),
                 "rt_forth_brk"   => Some(runtime::rt_forth_brk   as *mut c_void),
                 "rt_forth_trace" => Some(runtime::rt_forth_trace  as *mut c_void),
+                "rt_ir_begin"    => Some(runtime::rt_ir_begin     as *mut c_void),
+                "rt_ir_lit"      => Some(runtime::rt_ir_lit       as *mut c_void),
+                "rt_ir_word"     => Some(runtime::rt_ir_word      as *mut c_void),
+                "rt_ir_taint"    => Some(runtime::rt_ir_taint     as *mut c_void),
+                "rt_ir_finalize" => Some(runtime::rt_ir_finalize  as *mut c_void),
                 "rt_pin_analyze" => Some(runtime::rt_pin_analyze  as *mut c_void),
                 "rt_pin_rewrite" => Some(runtime::rt_pin_rewrite  as *mut c_void),
                 "rt_pin_emit_prologue"  => Some(runtime::rt_pin_emit_prologue  as *mut c_void),
@@ -1723,6 +1741,23 @@ impl Wf64Session {
         session.write_user_u64(USER_PIN_VOC_PLUS,   voc_plus);
         session.write_user_u64(USER_PIN_VOC_FFETCH, voc_ffetch);
         session.write_user_u64(USER_PIN_VOC_FSTORE, voc_fstore);
+
+        // WF66 token-IR capture: resolve the arithmetic xts the compile-time
+        // capture hook maps to Fops, and start with capture disabled.
+        let wf66_add = session.jit.lookup_addr("plus").context("wf66 vocab plus")?;
+        let wf66_sub = session.jit.lookup_addr("minus").context("wf66 vocab minus")?;
+        let wf66_mul = session.jit.lookup_addr("times").context("wf66 vocab times")?;
+        let wf66_and = session.jit.lookup_addr("and_").context("wf66 vocab and_")?;
+        let wf66_or  = session.jit.lookup_addr("or_").context("wf66 vocab or_")?;
+        let wf66_xor = session.jit.lookup_addr("xor_").context("wf66 vocab xor_")?;
+        session.write_user_u64(USER_WF66_VOC_ADD, wf66_add);
+        session.write_user_u64(USER_WF66_VOC_SUB, wf66_sub);
+        session.write_user_u64(USER_WF66_VOC_MUL, wf66_mul);
+        session.write_user_u64(USER_WF66_VOC_AND, wf66_and);
+        session.write_user_u64(USER_WF66_VOC_OR,  wf66_or);
+        session.write_user_u64(USER_WF66_VOC_XOR, wf66_xor);
+        session.write_user_u64(USER_WF66_ENABLE, 0);
+        session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {
             session.write_user_u64(USER_PIN_DEBUG, 1);
         }
@@ -2234,6 +2269,8 @@ impl Wf64Session {
         // Register-pinning recorder: clear so an error mid-loop can't leave
         // the recorder armed for the next definition.
         self.write_user_u64(USER_PIN_RECORDING, 0);
+        self.write_user_u64(USER_WF66_REC, 0);
+        self.write_user_u64(USER_WF66_ENABLE, 0);
         self.write_user_u64(USER_PIN_REPLAYING, 0);
         self.write_user_u64(USER_PIN_NEST,      0);
         self.write_user_u64(USER_PIN_BUF_LEN,   0);

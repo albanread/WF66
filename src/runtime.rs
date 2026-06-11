@@ -857,6 +857,103 @@ pub extern "C" fn rt_pin_emit_access(up: u64, encoded: u64) -> u64 {
     0
 }
 
+// ── WF66 token-IR capture (roadmap Phase 0) ────────────────────────────────
+// The kernel's compile-time convergence point calls these as it *shadows* each
+// definition: rt_ir_begin at `:`, rt_ir_lit / rt_ir_word per compiled token,
+// rt_ir_taint when an immediate word runs (its emission is opaque to the IR),
+// and rt_ir_finalize at `;`. The eager compiler runs untouched alongside;
+// finalize rewrites the body only when the whole span was Phase-0 deferrable
+// (literals + known arithmetic), otherwise the eager body stands — the
+// settle-to-canonical fallback. Gated by user_WF66_REC, which `:` sets only when
+// user_WF66_ENABLE is on. See docs/design/wf66_charter.md.
+
+thread_local! {
+    static WF66_IR: std::cell::RefCell<crate::wf66::IrBuilder> =
+        std::cell::RefCell::new(crate::wf66::IrBuilder::new());
+}
+
+/// Start capturing a new definition (from `:`). Arg: UP. Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_begin(_up: u64) -> u64 {
+    WF66_IR.with(|b| *b.borrow_mut() = crate::wf66::IrBuilder::new());
+    0
+}
+
+/// Append a literal push. Arg: UP, value. Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_lit(_up: u64, value: u64) -> u64 {
+    WF66_IR.with(|b| b.borrow_mut().lit(value as i64));
+    0
+}
+
+/// Map a compiled word's xt to a known inlinable Fop (else None -> taints).
+fn wf66_fop_of(up: u64, xt: u64) -> Option<crate::wf66::Fop> {
+    use crate::wf66::Fop;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_ADD) => Some(Fop::Add),
+        x if x == r(crate::USER_WF66_VOC_SUB) => Some(Fop::Sub),
+        x if x == r(crate::USER_WF66_VOC_MUL) => Some(Fop::Mul),
+        x if x == r(crate::USER_WF66_VOC_AND) => Some(Fop::And),
+        x if x == r(crate::USER_WF66_VOC_OR) => Some(Fop::Or),
+        x if x == r(crate::USER_WF66_VOC_XOR) => Some(Fop::Xor),
+        _ => None,
+    }
+}
+
+/// Append a compiled word: a known arithmetic primitive becomes `Inline(fop)`;
+/// anything else becomes a `Word` token, which taints the span as
+/// non-deferrable so the eager body is kept. Arg: UP, xt. Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
+    WF66_IR.with(|b| {
+        let mut b = b.borrow_mut();
+        match wf66_fop_of(up, xt) {
+            Some(f) => b.inline(f),
+            None => b.word(xt),
+        }
+    });
+    0
+}
+
+/// Mark the span non-deferrable: an immediate word ran during compile and its
+/// emission is opaque to the IR. Arg: UP. Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_taint(_up: u64) -> u64 {
+    WF66_IR.with(|b| b.borrow_mut().opaque());
+    0
+}
+
+/// Finalize the captured definition (from `;`). If the span is Phase-0
+/// deferrable, rewind HERE to the colon body start and overwrite the
+/// eagerly-compiled body with the folded/lowered WF66 body (including its
+/// `ret`), then return 1 so the kernel skips its own body-finishing. Otherwise
+/// return 0 and leave the eager body intact. Always clears user_WF66_REC.
+/// Arg: UP.
+#[no_mangle]
+pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
+    unsafe { *((up + crate::USER_WF66_REC) as *mut u64) = 0 };
+    let bytes = WF66_IR.with(|b| crate::wf66::compile_body_bytes(b.borrow().tokens()));
+    let bytes = match bytes {
+        Ok(b) => b,
+        Err(_) => return 0, // non-deferrable / lower failed -> keep eager body
+    };
+    let latest = unsafe { *((up + crate::USER_LATEST_VAR) as *const u64) };
+    if latest == 0 {
+        return 0;
+    }
+    // dh_xtptr (header + 0x10) is the colon body start.
+    let body_start = unsafe { *((latest + 0x10) as *const u64) };
+    if body_start == 0 {
+        return 0;
+    }
+    unsafe {
+        *((up + crate::USER_HERE_VAR) as *mut u64) = body_start;
+        emit_at_here(up, &bytes);
+    }
+    1
+}
+
 /// Run a major GC.  Walks BOTH the HEAPPTR region and the LITERAL
 /// region as roots (V2s: compile-time string literals live in the
 /// second region).  Caller passes `up` (the UP register value).
