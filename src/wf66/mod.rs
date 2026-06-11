@@ -766,6 +766,8 @@ fn reduce_pair(a: Token, b: Token) -> Option<Vec<Token>> {
     Some(match (a, b) {
         // DCE: a side-effect-free producer then drop -> nothing
         (Lit(_) | Stack(Dup) | Stack(Over), Stack(Drop)) => vec![],
+        // two drops collapse to one 2drop (frequent: `drop drop`, miner-ranked)
+        (Stack(Drop), Stack(Drop)) => vec![Stack(StackOp::TwoDrop)],
         // literal folded into an op -> register-immediate op
         (Lit(k), Inline(op)) if fits_i32(k) => vec![ImmOp { op, k }],
         // dup + binary op -> self-combining op (a+a, a*a, ...)
@@ -1058,6 +1060,23 @@ mod tests {
             ir.push(Token::Inline(Fop::Add));
         }
         assert_eq!(reduce(&ir), vec![Token::ImmOp { op: Fop::Add, k: 4 }]);
+    }
+
+    #[test]
+    fn reduce_collapses_two_drops() {
+        // drop drop -> 2drop ; drop drop drop -> 2drop drop
+        assert_eq!(
+            reduce(&[Token::Stack(StackOp::Drop), Token::Stack(StackOp::Drop)]),
+            vec![Token::Stack(StackOp::TwoDrop)]
+        );
+        assert_eq!(
+            reduce(&[
+                Token::Stack(StackOp::Drop),
+                Token::Stack(StackOp::Drop),
+                Token::Stack(StackOp::Drop)
+            ]),
+            vec![Token::Stack(StackOp::TwoDrop), Token::Stack(StackOp::Drop)]
+        );
     }
 
     #[test]
