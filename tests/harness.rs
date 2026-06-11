@@ -1751,6 +1751,28 @@ fn m7_ans_core_tests_pass() {
 }
 
 #[test]
+fn m7_ans_core_tests_pass_with_wf66() {
+    // The ANS Forth core test suite, compiled with WF66 ENABLED — the strongest
+    // conformance check for the optimizer (it rewrites every deferrable colon
+    // body in core.f + the test suite; anything else falls back to eager).
+    let mut s = sess();
+    s.set_wf66_enabled(true);
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    s.load_source_file(&manifest.join("lib").join("core.f")).unwrap();
+    s.load_source_file(&manifest.join("lib").join("tester.fs")).unwrap();
+    s.load_source_file(&manifest.join("lib").join("ans_core_tests.fs")).unwrap();
+    let out = s.eval("bye\n").unwrap();
+    assert!(
+        !out.contains("INCORRECT RESULT"),
+        "WF66 ANS core test failures:\n{out}"
+    );
+    assert!(
+        !out.contains("WRONG NUMBER OF RESULTS"),
+        "WF66 ANS core test failures:\n{out}"
+    );
+}
+
+#[test]
 fn load_source_file_provides_defer_defining_word() {
     let mut s = sess();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join("core.f");
