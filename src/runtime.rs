@@ -945,6 +945,17 @@ fn wf66_memop_of(up: u64, xt: u64) -> Option<crate::wf66::MemOp> {
     }
 }
 
+fn wf66_ctl_of(up: u64, xt: u64) -> Option<crate::wf66::Ctl> {
+    use crate::wf66::Ctl;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_IF) => Some(Ctl::If),
+        x if x == r(crate::USER_WF66_VOC_ELSE) => Some(Ctl::Else),
+        x if x == r(crate::USER_WF66_VOC_THEN) => Some(Ctl::Then),
+        _ => None,
+    }
+}
+
 /// Derived single-instruction ops that expand to a `(Lit(k), Inline(op))` pair,
 /// so the existing fold / strength-reduce / DCE passes optimize them (and fold
 /// them through constants).
@@ -992,6 +1003,11 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
                 eprintln!("[wf66] word xt={xt:#x} -> {m:?}");
             }
             b.mem(m);
+        } else if let Some(c) = wf66_ctl_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> {c:?}");
+            }
+            b.ctl(c);
         } else if let Some((k, f)) = wf66_litop_of(up, xt) {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> Lit({k}) {f:?}");

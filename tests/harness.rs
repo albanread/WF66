@@ -478,6 +478,59 @@ bye\n";
 }
 
 #[test]
+fn wf66_control_flow_matches_eager_oracle() {
+    // Phase 4a: IF/ELSE/THEN compile through WF66 (settle-everywhere branches).
+    // Flags come from the caller or literals (comparison ops aren't in the vocab
+    // yet). The eager compiler is the oracle, run over both branch directions.
+    let cases = [
+        (": sel if 11 else 22 then ;", "-1 sel .\n0 sel ."), // 11 then 22
+        (": addif if 100 + then ;", "5 -1 addif .\n5 0 addif ."), // 105 then 5
+        (": litf 0 if 1 else 2 then ;", "litf ."),           // const flag -> 2
+        (": nest if if 1 else 2 then else 3 then ;", "-1 -1 nest .\n-1 0 nest .\n0 0 nest ."), // 1,2,3
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
+fn wf66_control_flow_actually_rewrites() {
+    // Confirm a control-flow definition genuinely goes through WF66 (the body
+    // contains a Jcc/jmp from our lowering and differs from the eager body).
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    let prog = ": sel if 11 else 22 then ;\nbye\n";
+    let eager = {
+        let mut s = sess();
+        s.eval(prog).unwrap();
+        body(&s, "sel")
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(prog).unwrap();
+        body(&s, "sel")
+    };
+    assert_ne!(eager, wf66, "WF66 control-flow def should differ from eager (genuine rewrite)");
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.

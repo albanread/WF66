@@ -158,6 +158,19 @@ impl MemOp {
     }
 }
 
+/// A structured control-flow marker (Phase 4a). Lowered settle-everywhere: the
+/// data stack is canonical (TOS in `rax`, rest in memory) at every branch and
+/// join, so branches need no phis — behavior-identical to WF65, the safe
+/// substrate the register allocator (4b) builds on. Branch targets are emitted
+/// as rasm labels (the assembler resolves them; the body stays
+/// position-independent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ctl {
+    If,
+    Else,
+    Then,
+}
+
 /// One IR token of a straight-line span (charter §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -175,6 +188,8 @@ pub enum Token {
     Stack(StackOp),
     /// A memory access primitive (Phase 2.1).
     Mem(MemOp),
+    /// A structured control-flow marker (Phase 4a).
+    Ctl(Ctl),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -213,6 +228,10 @@ impl IrBuilder {
         self.tokens.push(Token::Mem(op));
     }
 
+    pub fn ctl(&mut self, c: Ctl) {
+        self.tokens.push(Token::Ctl(c));
+    }
+
     /// Splice a callee's token body into the current definition (Phase 3
     /// inlining). The spliced tokens then participate in the caller's fold /
     /// strength-reduce / DCE passes — folding across the former call boundary.
@@ -244,6 +263,9 @@ pub enum LowerError {
     /// region). In the wired compiler this routes to the settle-to-canonical
     /// fallback; here it is surfaced so callers never emit wrong code.
     Unsupported(Token),
+    /// Mismatched control-flow markers (e.g. `ELSE`/`THEN` without `IF`, or an
+    /// unclosed `IF`). The caller keeps the eager body.
+    UnbalancedControl,
 }
 
 impl std::fmt::Display for LowerError {
@@ -252,6 +274,7 @@ impl std::fmt::Display for LowerError {
             LowerError::Unsupported(t) => {
                 write!(f, "WF66 Phase 0 cannot lower token {t:?} (needs the settle fallback)")
             }
+            LowerError::UnbalancedControl => write!(f, "WF66: unbalanced control flow"),
         }
     }
 }
@@ -382,6 +405,11 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     s.push_str(&format!("    .globl {fn_name}\n"));
     s.push_str(&format!("{fn_name}:\n"));
 
+    // Control-flow lowering state: a stack of open IF frames (id, has_else) and
+    // a monotonic id for unique labels within this body.
+    let mut ctl: Vec<(u32, bool)> = Vec::new();
+    let mut ctl_id: u32 = 0;
+
     for &t in tokens {
         match t {
             Token::Lit(v) => {
@@ -395,12 +423,56 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             Token::ImmOp { op, k } => emit_imm_op(op, k, &mut s),
             Token::Stack(op) => op.emit(&mut s),
             Token::Mem(op) => op.emit(&mut s),
+            Token::Ctl(c) => emit_ctl(c, &mut s, &mut ctl, &mut ctl_id)?,
             Token::Word { .. } | Token::Opaque => return Err(LowerError::Unsupported(t)),
         }
     }
 
+    if !ctl.is_empty() {
+        return Err(LowerError::UnbalancedControl); // unclosed IF
+    }
     s.push_str("    ret\n");
     Ok(s)
+}
+
+/// Lower a structured control marker. Settle-everywhere: at IF the flag is the
+/// TOS in `rax`; consuming it is a `drop` (test the saved flag, reload TOS from
+/// memory), then a conditional branch to a rasm label the assembler resolves.
+fn emit_ctl(
+    c: Ctl,
+    out: &mut String,
+    ctl: &mut Vec<(u32, bool)>,
+    next_id: &mut u32,
+) -> Result<(), LowerError> {
+    match c {
+        Ctl::If => {
+            let id = *next_id;
+            *next_id += 1;
+            // consume the flag (a drop), then branch-if-false past the then-part
+            out.push_str("    mov rcx, rax\n"); // save flag
+            out.push_str("    mov rax, [rbp]\n"); // new TOS = NOS
+            out.push_str(&format!("    add rbp, {CELL}\n")); // drop flag cell
+            out.push_str("    test rcx, rcx\n");
+            out.push_str(&format!("    jz .wf66_c{id}_f\n"));
+            ctl.push((id, false));
+        }
+        Ctl::Else => {
+            let (id, has_else) = ctl.last_mut().ok_or(LowerError::UnbalancedControl)?;
+            *has_else = true;
+            let id = *id;
+            out.push_str(&format!("    jmp .wf66_c{id}_e\n")); // then-part done
+            out.push_str(&format!(".wf66_c{id}_f:\n")); // false lands here (else-part)
+        }
+        Ctl::Then => {
+            let (id, has_else) = ctl.pop().ok_or(LowerError::UnbalancedControl)?;
+            if has_else {
+                out.push_str(&format!(".wf66_c{id}_e:\n"));
+            } else {
+                out.push_str(&format!(".wf66_c{id}_f:\n"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The per-`;` finalizer pipeline in one call: capture (the `tokens`) -> optimize
@@ -426,6 +498,7 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::ImmOp { .. }
                 | Token::Stack(_)
                 | Token::Mem(_)
+                | Token::Ctl(_)
         )
     })
 }
@@ -692,6 +765,72 @@ mod tests {
         assert!(is_deferrable(&[Token::Lit(1), Token::Inline(Fop::Add)]));
         assert!(!is_deferrable(&[Token::Lit(1), Token::Word { xt: 0 }]));
         assert!(!is_deferrable(&[Token::Opaque]));
+    }
+
+    // ---- control flow (Phase 4a) ---------------------------------------
+
+    #[test]
+    fn ctl_if_else_then_assembles() {
+        // ( flag -- n ) : if 1 else 2 then
+        let asm = lower(
+            &[
+                Token::Ctl(Ctl::If),
+                Token::Lit(1),
+                Token::Ctl(Ctl::Else),
+                Token::Lit(2),
+                Token::Ctl(Ctl::Then),
+            ],
+            "wf66_t_if",
+        )
+        .unwrap();
+        wfasm::rasm::assemble(&asm)
+            .unwrap_or_else(|e| panic!("if/else/then rejected: {e:#}\nasm:\n{asm}"));
+    }
+
+    #[test]
+    fn ctl_if_then_no_else_assembles() {
+        // ( n flag -- n|n+100 ) : if 100 + then
+        let asm = lower(
+            &[
+                Token::Ctl(Ctl::If),
+                Token::ImmOp { op: Fop::Add, k: 100 },
+                Token::Ctl(Ctl::Then),
+            ],
+            "wf66_t_ift",
+        )
+        .unwrap();
+        wfasm::rasm::assemble(&asm)
+            .unwrap_or_else(|e| panic!("if/then rejected: {e:#}\nasm:\n{asm}"));
+    }
+
+    #[test]
+    fn ctl_nested_assembles() {
+        // nested if inside if
+        let asm = lower(
+            &[
+                Token::Ctl(Ctl::If),
+                Token::Ctl(Ctl::If),
+                Token::Lit(1),
+                Token::Ctl(Ctl::Then),
+                Token::Ctl(Ctl::Then),
+            ],
+            "wf66_t_nest",
+        )
+        .unwrap();
+        wfasm::rasm::assemble(&asm)
+            .unwrap_or_else(|e| panic!("nested if rejected: {e:#}\nasm:\n{asm}"));
+    }
+
+    #[test]
+    fn ctl_unbalanced_errors() {
+        assert_eq!(
+            lower(&[Token::Ctl(Ctl::Then)], "x"),
+            Err(LowerError::UnbalancedControl)
+        );
+        assert_eq!(
+            lower(&[Token::Ctl(Ctl::If)], "x"),
+            Err(LowerError::UnbalancedControl)
+        );
     }
 
     // ---- memory ops (Phase 2.1) ----------------------------------------

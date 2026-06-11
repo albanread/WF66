@@ -819,6 +819,10 @@ pub(crate) const USER_WF66_VOC_CELLP:  u64 = 0x1A68; // cell+ -> 8 +
 pub(crate) const USER_WF66_VOC_CELLS:  u64 = 0x1A70; // cells -> 8 *
 pub(crate) const USER_WF66_VOC_NEGATE: u64 = 0x1A78; // negate-> -1 *  (neg)
 pub(crate) const USER_WF66_VOC_INVERT: u64 = 0x1A80; // invert-> -1 xor (not)
+// Structured control-flow words (Phase 4a).
+pub(crate) const USER_WF66_VOC_IF:   u64 = 0x1A88; // if   (if_word)
+pub(crate) const USER_WF66_VOC_ELSE: u64 = 0x1A90; // else (else_word)
+pub(crate) const USER_WF66_VOC_THEN: u64 = 0x1A98; // then (then_word)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1814,6 +1818,13 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_CELLS, wf66_cells);
         session.write_user_u64(USER_WF66_VOC_NEGATE, wf66_negate);
         session.write_user_u64(USER_WF66_VOC_INVERT, wf66_invert);
+        // Structured control-flow words (Phase 4a).
+        let wf66_if = session.jit.lookup_addr("if_word").context("wf66 vocab if_word")?;
+        let wf66_else = session.jit.lookup_addr("else_word").context("wf66 vocab else_word")?;
+        let wf66_then = session.jit.lookup_addr("then_word").context("wf66 vocab then_word")?;
+        session.write_user_u64(USER_WF66_VOC_IF, wf66_if);
+        session.write_user_u64(USER_WF66_VOC_ELSE, wf66_else);
+        session.write_user_u64(USER_WF66_VOC_THEN, wf66_then);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {
