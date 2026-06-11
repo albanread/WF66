@@ -1055,6 +1055,66 @@ fn render(instrs: &[Instr]) -> String {
     s
 }
 
+/// Store->load forwarding (Step 2.2): within a barrier-free window, a `LoadCell`
+/// of a physical data-stack cell whose value is already in a live register is
+/// replaced by a register move — or dropped entirely if it's already in the
+/// destination register.
+///
+/// Soundness rests on the window model: any `Raw` line (a Fop touching `[rbp]`, a
+/// register-clobbering `mov`, a label, a call, `ret`) ends the window and clears
+/// all knowledge. Inside a window the only ops are `AdjustDsp` (moves rbp — the
+/// running `delta` keeps cell identity absolute), `LoadCell` (the only register
+/// write), and `StoreCell` (a memory write). So "register r still holds cell c"
+/// can never be silently invalidated: a reg is only re-written by a `LoadCell`
+/// (we drop r's cell mappings then), a cell only by a `StoreCell` (we overwrite
+/// its mapping), and anything we can't see is a `Raw` barrier.
+fn forward_loads(instrs: Vec<Instr>) -> Vec<Instr> {
+    use std::collections::HashMap;
+    let mut out: Vec<Instr> = Vec::with_capacity(instrs.len());
+    let mut delta: i64 = 0; // rbp offset from the current window's start
+    let mut cell: HashMap<i64, String> = HashMap::new(); // phys offset -> reg holding it
+    for ins in instrs {
+        match ins {
+            Instr::AdjustDsp(n) => {
+                delta += n;
+                out.push(Instr::AdjustDsp(n));
+            }
+            Instr::StoreCell { disp, src } => {
+                // the cell now equals src's value
+                cell.insert(delta + disp, src.clone());
+                out.push(Instr::StoreCell { disp, src });
+            }
+            Instr::LoadCell { dst, disp } => {
+                let phys = delta + disp;
+                match cell.get(&phys) {
+                    // already in the destination: the load is redundant, drop it
+                    Some(r) if *r == dst => {}
+                    // in another register: forward as a reg move
+                    Some(r) => {
+                        let mv = format!("    mov {dst}, {r}");
+                        cell.retain(|_, v| *v != dst); // dst is clobbered
+                        cell.insert(phys, dst.clone()); // ...and now holds this cell
+                        out.push(Instr::Raw(mv));
+                    }
+                    // genuine load: dst is clobbered, then holds this cell
+                    None => {
+                        cell.retain(|_, v| *v != dst);
+                        cell.insert(phys, dst.clone());
+                        out.push(Instr::LoadCell { dst, disp });
+                    }
+                }
+            }
+            Instr::Raw(l) => {
+                // barrier: anything we can't model ends the window
+                cell.clear();
+                delta = 0;
+                out.push(Instr::Raw(l));
+            }
+        }
+    }
+    out
+}
+
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
 /// i.e. WF66 can lower the whole body. Any `Word`/`Opaque` (an unknown word, an
 /// immediate word's emission, a `CODE:` region) makes the span non-deferrable;
@@ -1116,9 +1176,8 @@ pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
         return Err(CompileError::NotDeferrable);
     }
     let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
-    // Deferred assembly: lex to instruction records, (reduce — later), re-render.
-    // render(parse_instrs(asm)) == asm today, so this is behaviour-identical.
-    let asm = render(&parse_instrs(&asm));
+    // Deferred assembly: lex to instruction records, reduce, re-render.
+    let asm = render(&forward_loads(parse_instrs(&asm)));
     let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
     let fn_off = *module
         .symbols
@@ -1328,6 +1387,128 @@ mod tests {
                 .any(|i| matches!(i, Instr::LoadCell { .. } | Instr::StoreCell { .. })),
             "[rax] program memory must stay Raw: {fetch:?}"
         );
+    }
+
+    // ---- store->load forwarding (Step 2.2) ------------------------------
+
+    #[test]
+    fn forward_load_to_reg_move() {
+        // store rax -> cell; rbp moves; load that same physical cell into rcx.
+        // rax still holds it -> the load becomes `mov rcx, rax`.
+        let buf = vec![
+            Instr::StoreCell {
+                disp: -8,
+                src: "rax".into(),
+            },
+            Instr::AdjustDsp(-8),
+            Instr::LoadCell {
+                dst: "rcx".into(),
+                disp: 0,
+            },
+        ];
+        assert_eq!(
+            forward_loads(buf),
+            vec![
+                Instr::StoreCell {
+                    disp: -8,
+                    src: "rax".into()
+                },
+                Instr::AdjustDsp(-8),
+                Instr::Raw("    mov rcx, rax".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn forward_drops_redundant_reload() {
+        // load back into the same register that already holds the cell -> dropped.
+        let buf = vec![
+            Instr::StoreCell {
+                disp: -8,
+                src: "rax".into(),
+            },
+            Instr::AdjustDsp(-8),
+            Instr::LoadCell {
+                dst: "rax".into(),
+                disp: 0,
+            },
+        ];
+        assert_eq!(
+            forward_loads(buf),
+            vec![
+                Instr::StoreCell {
+                    disp: -8,
+                    src: "rax".into()
+                },
+                Instr::AdjustDsp(-8),
+            ]
+        );
+    }
+
+    #[test]
+    fn forward_stops_at_raw_barrier() {
+        // a Raw line (here also clobbering rax) ends the window: no forwarding.
+        let buf = vec![
+            Instr::StoreCell {
+                disp: -8,
+                src: "rax".into(),
+            },
+            Instr::Raw("    mov rax, 5".into()),
+            Instr::AdjustDsp(-8),
+            Instr::LoadCell {
+                dst: "rcx".into(),
+                disp: 0,
+            },
+        ];
+        assert_eq!(forward_loads(buf.clone()), buf);
+    }
+
+    #[test]
+    fn forward_load_then_reload_after_clobber_is_not_forwarded() {
+        // store rax->cell; load cell into rax (clobbers rax); load cell again into
+        // rcx -> must forward from rax (which now holds it), NOT from a stale map.
+        let buf = vec![
+            Instr::StoreCell {
+                disp: 0,
+                src: "rax".into(),
+            },
+            Instr::LoadCell {
+                dst: "rax".into(),
+                disp: 0,
+            }, // redundant: rax already holds cell 0 -> dropped
+            Instr::LoadCell {
+                dst: "rcx".into(),
+                disp: 0,
+            }, // rax still holds cell 0 -> mov rcx, rax
+        ];
+        assert_eq!(
+            forward_loads(buf),
+            vec![
+                Instr::StoreCell {
+                    disp: 0,
+                    src: "rax".into()
+                },
+                Instr::Raw("    mov rcx, rax".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn forward_dup_over_drops_a_reload_and_still_assembles() {
+        // end-to-end: `dup over` reloads a cell rax already holds; forwarding
+        // shrinks the buffer and the result must still encode.
+        let asm = lower(
+            &[Token::Stack(StackOp::Dup), Token::Stack(StackOp::Over)],
+            "rt",
+        )
+        .unwrap();
+        let before = parse_instrs(&asm);
+        let after = forward_loads(before.clone());
+        assert!(
+            after.len() < before.len(),
+            "forwarding should drop a reload: {before:?} -> {after:?}"
+        );
+        assert!(wfasm::rasm::assemble(&render(&after)).is_ok());
     }
 
     // ---- unified reduce engine: cascades a fixed pipeline misses ---------

@@ -242,6 +242,8 @@ fn wf66_size_report() {
         ("imm-chain", ": w 7 + 3 + ;"),     // cascade: -> + 10
         ("inc-chain", ": w 1+ 1+ 1+ 1+ ;"), // cascade: -> + 4
         ("dup-const", ": w 2 dup * ;"),     // cascade: -> push 4
+        ("fwd-dup-over", ": w dup over ;"), // 2.2: reload of a held cell -> dropped
+        ("fwd-over-over", ": w over over ;"), // 2.2: store->load forwarded
     ];
     eprintln!("\n  category        eager   wf66   delta");
     for (cat, prog) in cases {
