@@ -335,6 +335,35 @@ fn wf66_dce_matches_eager_oracle() {
 }
 
 #[test]
+fn wf66_memory_ops_match_eager_oracle() {
+    // Phase 2.1: @ ! c@ c! compile through WF66 (the variable push happens at the
+    // call site, so the words below are pure stack-address memory ops). The eager
+    // compiler is the oracle, and we read program-defined memory back.
+    let src = "\
+variable v\n\
+: getv @ ;\n\
+: setv ! ;\n\
+: bump dup @ 1+ swap ! ;\n\
+99 v setv\n\
+v getv .\n\
+v bump\n\
+v getv .\n\
+bye\n";
+    let eager = {
+        let mut s = sess();
+        s.eval(src).unwrap()
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(src).unwrap()
+    };
+    assert_eq!(eager, wf66, "WF66 != eager for memory-op program");
+    assert!(wf66.contains("99"), "expected 99 then 100, got {wf66:?}");
+    assert!(wf66.contains("100"), "expected bump -> 100, got {wf66:?}");
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.

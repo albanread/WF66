@@ -917,6 +917,18 @@ fn wf66_stackop_of(up: u64, xt: u64) -> Option<crate::wf66::StackOp> {
     }
 }
 
+fn wf66_memop_of(up: u64, xt: u64) -> Option<crate::wf66::MemOp> {
+    use crate::wf66::MemOp;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_FETCH) => Some(MemOp::Fetch),
+        x if x == r(crate::USER_WF66_VOC_STORE) => Some(MemOp::Store),
+        x if x == r(crate::USER_WF66_VOC_CFETCH) => Some(MemOp::CFetch),
+        x if x == r(crate::USER_WF66_VOC_CSTORE) => Some(MemOp::CStore),
+        _ => None,
+    }
+}
+
 /// Append a compiled word: a known arithmetic primitive becomes `Inline(fop)`;
 /// anything else becomes a `Word` token, which taints the span as
 /// non-deferrable so the eager body is kept. Arg: UP, xt. Returns 0.
@@ -941,6 +953,11 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
                 eprintln!("[wf66] word xt={xt:#x} -> {s:?}");
             }
             b.stack(s);
+        } else if let Some(m) = wf66_memop_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> {m:?}");
+            }
+            b.mem(m);
         } else {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> TAINT");

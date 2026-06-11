@@ -806,6 +806,10 @@ pub(crate) const USER_WF66_VOC_DROP: u64 = 0x1A10; // drop (drop_)
 pub(crate) const USER_WF66_VOC_SWAP: u64 = 0x1A18; // swap (swap_)
 pub(crate) const USER_WF66_VOC_OVER: u64 = 0x1A20; // over (over_)
 pub(crate) const USER_WF66_VOC_NIP:  u64 = 0x1A28; // nip (nip_)
+pub(crate) const USER_WF66_VOC_FETCH:  u64 = 0x1A30; // @  (fetch)
+pub(crate) const USER_WF66_VOC_STORE:  u64 = 0x1A38; // !  (store)
+pub(crate) const USER_WF66_VOC_CFETCH: u64 = 0x1A40; // c@ (c_fetch)
+pub(crate) const USER_WF66_VOC_CSTORE: u64 = 0x1A48; // c! (c_store)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1777,6 +1781,15 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_SWAP, wf66_swap);
         session.write_user_u64(USER_WF66_VOC_OVER, wf66_over);
         session.write_user_u64(USER_WF66_VOC_NIP, wf66_nip);
+        // Memory-access vocabulary (Phase 2.1).
+        let wf66_fetch = session.jit.lookup_addr("fetch").context("wf66 vocab fetch")?;
+        let wf66_store = session.jit.lookup_addr("store").context("wf66 vocab store")?;
+        let wf66_cfetch = session.jit.lookup_addr("c_fetch").context("wf66 vocab c_fetch")?;
+        let wf66_cstore = session.jit.lookup_addr("c_store").context("wf66 vocab c_store")?;
+        session.write_user_u64(USER_WF66_VOC_FETCH, wf66_fetch);
+        session.write_user_u64(USER_WF66_VOC_STORE, wf66_store);
+        session.write_user_u64(USER_WF66_VOC_CFETCH, wf66_cfetch);
+        session.write_user_u64(USER_WF66_VOC_CSTORE, wf66_cstore);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

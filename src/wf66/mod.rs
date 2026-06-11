@@ -124,6 +124,40 @@ impl StackOp {
     }
 }
 
+/// A memory access primitive (Phase 2.1). Lowered in program order
+/// (settle-everywhere); since no pass reorders across these tokens, program
+/// order is the implicit memory-ordering barrier until the CFG/regalloc phases
+/// add motion (then an explicit barrier is needed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemOp {
+    Fetch,  // @  ( addr -- val )
+    Store,  // !  ( val addr -- )
+    CFetch, // c@ ( addr -- byte )
+    CStore, // c! ( byte addr -- )
+}
+
+impl MemOp {
+    /// Settle-everywhere lowering (TOS in `rax`, NOS at `[rbp]`, `rcx` scratch).
+    fn emit(self, out: &mut String) {
+        match self {
+            MemOp::Fetch => out.push_str("    mov rax, [rax]\n"),
+            MemOp::CFetch => out.push_str("    movzx eax, byte ptr [rax]\n"),
+            // ! / c! : addr in rax, value in [rbp]; store, then drop both cells
+            // (new TOS = the cell below the value).
+            MemOp::Store | MemOp::CStore => {
+                out.push_str("    mov rcx, [rbp]\n");
+                if matches!(self, MemOp::Store) {
+                    out.push_str("    mov [rax], rcx\n");
+                } else {
+                    out.push_str("    mov [rax], cl\n");
+                }
+                out.push_str(&format!("    mov rax, [rbp + {CELL}]\n"));
+                out.push_str(&format!("    add rbp, {}\n", 2 * CELL));
+            }
+        }
+    }
+}
+
 /// One IR token of a straight-line span (charter §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -139,6 +173,8 @@ pub enum Token {
     ImmOp { op: Fop, k: i64 },
     /// A stack-shuffle primitive (Phase 1.1).
     Stack(StackOp),
+    /// A memory access primitive (Phase 2.1).
+    Mem(MemOp),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -171,6 +207,10 @@ impl IrBuilder {
 
     pub fn stack(&mut self, op: StackOp) {
         self.tokens.push(Token::Stack(op));
+    }
+
+    pub fn mem(&mut self, op: MemOp) {
+        self.tokens.push(Token::Mem(op));
     }
 
     pub fn word(&mut self, xt: u64) {
@@ -347,6 +387,7 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             Token::Inline(op) => op.emit_bare(&mut s),
             Token::ImmOp { op, k } => emit_imm_op(op, k, &mut s),
             Token::Stack(op) => op.emit(&mut s),
+            Token::Mem(op) => op.emit(&mut s),
             Token::Word { .. } | Token::Opaque => return Err(LowerError::Unsupported(t)),
         }
     }
@@ -373,7 +414,11 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
     tokens.iter().all(|t| {
         matches!(
             t,
-            Token::Lit(_) | Token::Inline(_) | Token::ImmOp { .. } | Token::Stack(_)
+            Token::Lit(_)
+                | Token::Inline(_)
+                | Token::ImmOp { .. }
+                | Token::Stack(_)
+                | Token::Mem(_)
         )
     })
 }
@@ -640,6 +685,27 @@ mod tests {
         assert!(is_deferrable(&[Token::Lit(1), Token::Inline(Fop::Add)]));
         assert!(!is_deferrable(&[Token::Lit(1), Token::Word { xt: 0 }]));
         assert!(!is_deferrable(&[Token::Opaque]));
+    }
+
+    // ---- memory ops (Phase 2.1) ----------------------------------------
+
+    #[test]
+    fn mem_ops_assemble() {
+        for op in [MemOp::Fetch, MemOp::Store, MemOp::CFetch, MemOp::CStore] {
+            let asm = lower(&[Token::Mem(op)], "wf66_t_mem").unwrap();
+            wfasm::rasm::assemble(&asm)
+                .unwrap_or_else(|e| panic!("{op:?} rejected: {e:#}\nasm:\n{asm}"));
+        }
+    }
+
+    #[test]
+    fn mem_body_is_deferrable() {
+        // : @1+ @ 1 + ;  ( addr -- *addr+1 )
+        assert!(is_deferrable(&[
+            Token::Mem(MemOp::Fetch),
+            Token::Lit(1),
+            Token::Inline(Fop::Add),
+        ]));
     }
 
     // ---- DCE (Phase 1.3) -----------------------------------------------
