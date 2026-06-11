@@ -239,6 +239,9 @@ fn wf66_size_report() {
         ("shuffle", ": w dup * ;"),
         ("cond", ": w dup 0< if negate then ;"),
         ("loop", ": w begin 1- dup 0= until ;"),
+        ("imm-chain", ": w 7 + 3 + ;"),     // cascade: -> + 10
+        ("inc-chain", ": w 1+ 1+ 1+ 1+ ;"), // cascade: -> + 4
+        ("dup-const", ": w 2 dup * ;"),     // cascade: -> push 4
     ];
     eprintln!("\n  category        eager   wf66   delta");
     for (cat, prog) in cases {

@@ -742,16 +742,96 @@ fn emit_ctl(
     Ok(())
 }
 
-/// The per-`;` finalizer pipeline in one call: capture (the `tokens`) -> optimize
-/// (`const_fold`) -> lower. This is the entry point the wired `;` will call once
-/// the kernel capture hook lands.
+/// Combine two adjacent same-op immediates into one (`+a +b -> +(a+b)`,
+/// `*a *b -> *(a*b)`, `-a -b -> -(a+b)`, bitwise likewise), if the combined
+/// immediate still fits a sign-extended imm32. Returns `None` to leave them split.
+fn combine_imm(op: Fop, a: i64, b: i64) -> Option<i64> {
+    let r = match op {
+        Fop::Add | Fop::Sub => a.checked_add(b)?, // x-a-b = x-(a+b)
+        Fop::Mul => a.checked_mul(b)?,
+        Fop::And => a & b,
+        Fop::Or => a | b,
+        Fop::Xor => a ^ b,
+    };
+    fits_i32(r).then_some(r)
+}
+
+/// Try to reduce a single adjacent token pair to a fused "opti" replacement.
+/// This is the rule table — each arm replaces a common sequence with one fused
+/// IR node that lowers to optimal inline code (no call). Returns the replacement
+/// (0, 1, or 2 tokens) or `None` if no rule applies.
+fn reduce_pair(a: Token, b: Token) -> Option<Vec<Token>> {
+    use StackOp::{Drop, Dup, Over};
+    use Token::{Cmp, DupOp, ImmOp, Inline, Lit, Stack};
+    Some(match (a, b) {
+        // DCE: a side-effect-free producer then drop -> nothing
+        (Lit(_) | Stack(Dup) | Stack(Over), Stack(Drop)) => vec![],
+        // literal folded into an op -> register-immediate op
+        (Lit(k), Inline(op)) if fits_i32(k) => vec![ImmOp { op, k }],
+        // dup + binary op -> self-combining op (a+a, a*a, ...)
+        (Stack(Dup), Inline(op)) => vec![DupOp(op)],
+        // comparison feeding a flag test -> branch off the operand directly
+        (Cmp(c), Token::Ctl(ctl @ (Ctl::If | Ctl::Until | Ctl::While))) => {
+            vec![Token::CmpCtl(c, ctl)]
+        }
+        // constant through a self-op (k dup* = k*k) -> constant
+        (Lit(k), DupOp(op)) => vec![Lit(op.eval(k, k))],
+        // constant through an immediate op -> constant
+        (Lit(k), ImmOp { op, k: j }) => vec![Lit(op.eval(k, j))],
+        // two same-op immediates collapse (7 + 3 + -> +10; 1+ 1+ 1+ 1+ -> +4)
+        (ImmOp { op: o1, k: k1 }, ImmOp { op: o2, k: k2 }) if o1 == o2 => {
+            vec![ImmOp { op: o1, k: combine_imm(o1, k1, k2)? }]
+        }
+        _ => return None,
+    })
+}
+
+/// Repeatedly reduce the tail of `out` until no rule fires (window-3 const-fold
+/// first, then the window-2 rule table). Shift-reduce: because reductions only
+/// shorten the tail and the new tail is re-checked, one forward sweep reaches a
+/// fixpoint, including cascades.
+fn reduce_tail(out: &mut Vec<Token>) {
+    loop {
+        let n = out.len();
+        if n >= 3 {
+            if let (Token::Lit(a), Token::Lit(b), Token::Inline(op)) =
+                (out[n - 3], out[n - 2], out[n - 1])
+            {
+                let v = op.eval(a, b);
+                out.truncate(n - 3);
+                out.push(Token::Lit(v));
+                continue;
+            }
+        }
+        if n >= 2 {
+            if let Some(rep) = reduce_pair(out[n - 2], out[n - 1]) {
+                out.truncate(n - 2);
+                out.extend(rep);
+                continue;
+            }
+        }
+        break;
+    }
+}
+
+/// The unified reduction engine: shift each token onto the output and reduce the
+/// tail to a fixpoint. Subsumes const-fold / DCE / imm-fold / dup-fuse /
+/// compare→branch as one rule table run to fixpoint, and catches the cascades a
+/// fixed-order pipeline misses (`7 + 3 + -> +10`, `1+ 1+ 1+ 1+ -> +4`,
+/// `2 dup * -> 4`). Whole-definition visibility is what makes this possible.
+pub fn reduce(tokens: &[Token]) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    for &t in tokens {
+        out.push(t);
+        reduce_tail(&mut out);
+    }
+    out
+}
+
+/// The per-`;` finalizer pipeline in one call: capture -> reduce -> lower.
 pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
-    let folded = const_fold(tokens);
-    let pruned = dce(&folded);
-    let scheduled = fold_imm_ops(&pruned);
-    let fused = fold_dup_op(&scheduled);
-    let branched = fold_cmp_branch(&fused);
-    lower(&branched, fn_name)
+    let reduced = reduce(tokens);
+    lower(&reduced, fn_name)
 }
 
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
@@ -955,6 +1035,52 @@ mod tests {
         .unwrap();
         assert!(!bytes.is_empty());
         assert!(bytes.contains(&0xC3));
+    }
+
+    // ---- unified reduce engine: cascades a fixed pipeline misses ---------
+
+    #[test]
+    fn reduce_combines_consecutive_immediates() {
+        // 7 + 3 +  ->  +10
+        assert_eq!(
+            reduce(&[
+                Token::Lit(7),
+                Token::Inline(Fop::Add),
+                Token::Lit(3),
+                Token::Inline(Fop::Add),
+            ]),
+            vec![Token::ImmOp { op: Fop::Add, k: 10 }]
+        );
+        // 1+ 1+ 1+ 1+  ->  +4
+        let mut ir = Vec::new();
+        for _ in 0..4 {
+            ir.push(Token::Lit(1));
+            ir.push(Token::Inline(Fop::Add));
+        }
+        assert_eq!(reduce(&ir), vec![Token::ImmOp { op: Fop::Add, k: 4 }]);
+    }
+
+    #[test]
+    fn reduce_folds_constant_through_self_op() {
+        // 2 dup *  ->  Lit 4   (dup-fuse then const-fold-through-DupOp)
+        assert_eq!(
+            reduce(&[Token::Lit(2), Token::Stack(StackOp::Dup), Token::Inline(Fop::Mul)]),
+            vec![Token::Lit(4)]
+        );
+    }
+
+    #[test]
+    fn reduce_subsumes_const_fold_and_dce() {
+        assert_eq!(
+            reduce(&[Token::Lit(5), Token::Lit(7), Token::Inline(Fop::Add)]),
+            vec![Token::Lit(12)]
+        );
+        assert_eq!(reduce(&[Token::Lit(5), Token::Stack(StackOp::Drop)]), vec![]);
+        // cmp -> branch fusion still happens through the unified engine
+        assert_eq!(
+            reduce(&[Token::Cmp(CmpOp::ZeroEq), Token::Ctl(Ctl::If)]),
+            vec![Token::CmpCtl(CmpOp::ZeroEq, Ctl::If)]
+        );
     }
 
     // ---- fold_imm_ops + strength reduction (Phase 1.2) ------------------
