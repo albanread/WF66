@@ -2,7 +2,7 @@
 
 Status: **plan.** The VFX-class jump. Assumes Phases 0–3 done (token IR, straight-
 line const-fold / strength-reduce / shuffle-elim, inlining via token-splice; JASM
-/Rasm back end; Rust-side optimizer; WF65 as byte-for-byte state oracle). Extends
+/Rasm back end; Rust-side optimizer; WF65 as the differential state oracle). Extends
 [`wf66_charter.md`](wf66_charter.md) §"Back End" and [`wf66_compiler.md`](wf66_compiler.md) §§3–5.
 
 ## 0. Where Phase 4 starts, what it adds
@@ -29,8 +29,15 @@ handle and settles at the ones it can't.* Consequences:
   independently oracle-gated. You can stop after any step with a real, correct win.
 - **Three boundaries always settle, non-negotiably:** definition exit (`;`),
   non-inlined calls, and opaque/dynamic regions (`EXECUTE`, raw poke, unknown
-  immediate words). This is what keeps Forth's stack semantics and WF65 byte-for-
-  byte final-state equivalence intact.
+  immediate words). This is what keeps Forth's stack semantics and WF65
+  observable-state equivalence intact.
+- **Exceptions need no extra data-stack settling.** `CATCH` settles via `EXECUTE`
+  and `THROW` restores the data-stack pointer from the catch frame, discarding
+  register-resident values above it — so faulting fops are *not* settle boundaries
+  for anonymous values. The one obligation: a **promoted named cell**
+  (`VARIABLE`/`VALUE` — the subsumed `hotvariable`) is written back before any
+  THROW-capable op in its range, so program-defined memory stays canonical on
+  `THROW` (charter *Exceptions*).
 
 ## 2. IR additions (Rust-side)
 
@@ -41,9 +48,9 @@ handle and settles at the ones it can't.* Consequences:
   occupies each cell). Joins require equal depth → the **stack-balance check**;
   one phi per cell.
 - Each `Inline(fop)` carries a **`RegEffect{ins, outs, clobbers}`** so the
-  allocator schedules around it. This extends the charter's two-sources-of-truth:
-  the fop template both emits bytes *and* declares its register interface, checked
-  against the kernel `proc` body by a golden test.
+  allocator schedules around it. This extends the charter's **Two Sources of
+  Truth** contract: the fop template both emits bytes *and* declares its register
+  interface, checked against the kernel `proc` body by a golden test.
 
 ## 3. Sub-phase 4a — CFG + SSA, **zero codegen change** (the safe substrate)
 
@@ -63,8 +70,9 @@ substrate from the risk.
    error on mismatch — a new static bug-catch WF65 lacked).
 4. Lower: each block settles to canonical at entry/exit (Phase-3 per-span
    lowering). **Registers do not cross blocks yet.**
-5. **Gate:** the whole-touched-region differential fuzzer + the suite must be
-   byte-for-byte identical to Phase 3. It's a pure refactor.
+5. **Gate:** the differential state fuzzer + the suite must match Phase 3 exactly
+   — 4a is a pure refactor with zero codegen change, so output is identical to its
+   own predecessor (a stronger self-check than the WF65 observable-state oracle).
 
 **Deliverable:** CFG+SSA substrate, behavior-identical, plus the static stack-
 balance check (already a user-visible correctness win).
@@ -73,7 +81,7 @@ balance check (already a user-visible correctness win).
 
 Replace settle-at-boundary lowering with an allocator, expanding scope
 incrementally. Each step keeps strictly more values in registers; settle-to-
-canonical everywhere it can't; **byte-for-byte state-oracle gate each step.**
+canonical everywhere it can't; **differential observable-state oracle gate each step.**
 
 ### 4b.1 — extended blocks (fallthrough chains, no joins)
 
@@ -102,12 +110,16 @@ canonical everywhere it can't; **byte-for-byte state-oracle gate each step.**
 - Allocate across back-edges. **Loop-carried** data-stack values get a fixed
   register at the loop header that the back-edge restores (a move on the back-edge
   if needed); live ranges span the whole loop body.
-- **The DO counter stays on the rstack** — we deliberately rejected pinning it
-  (`return-stack-locals-fast`); `i`/`j` read `[rsp]`/`[rsp+8]` as today. The win is
-  the *other* loop-carried cells — accumulators (the fib pair, mandelbrot `zx/zy`)
-  — living in registers across iterations.
+- **The DO counter stays on the rstack** — we deliberately keep it in memory rather
+  than pinning it; `i`/`j` read `[rsp]`/`[rsp+8]` as today. This also keeps `THROW`'s
+  return-stack restore unchanged (charter *Exceptions*). The win is the *other*
+  loop-carried cells — accumulators (the fib pair, mandelbrot `zx/zy`) — living in
+  registers across iterations.
 - **`hotvariable` pinning is subsumed:** a variable live across the loop just gets
-  a register from the allocator.
+  a register from the allocator. If it is a **named cell** (`VARIABLE`/`VALUE`), the
+  allocator writes it back before any THROW-capable op in the loop so its memory is
+  canonical on `THROW` (charter *Exceptions*); anonymous accumulators carry no such
+  obligation.
 - **Values that must survive a call inside the loop** go only in registers proven
   callee-preserved and free in compiled-body context. Candidate GP pair: R13/R14;
   floats: xmm6–15, mirroring the float-pin precedent (xmm6–9 held across
@@ -139,8 +151,8 @@ manifest once values stay in registers):
   3) avoids this for hot small callees, so the ABI cost only hits real (large /
   recursive) calls where it's negligible.
 - **Definition exit (`;`):** settle to canonical — this is precisely what makes
-  WF66 output byte-for-byte stack-equivalent to WF65, which the oracle gate
-  depends on.
+  WF66's observable state (the data-stack region + depth) match WF65, which the
+  oracle gate depends on.
 
 ## 7. Register budget & the fop register interface
 
@@ -156,19 +168,24 @@ manifest once values stay in registers):
 
 ## 8. Verification — the net that makes aggression safe
 
-- **WF65 byte-for-byte state oracle** is the primary gate for *every* 4b step: same
-  source → same result **and** same final data-stack region + `rbp` + scratch
-  (settle-at-exit makes this exact). The whole-touched-region differential fuzzer
-  runs it.
+- **WF65 differential oracle** is the primary gate for *every* 4b step: same
+  source → same **observable Forth state** (data stack + depth, program-defined
+  memory, output). Scratch registers and spill memory are *not* compared — settle-
+  at-exit makes the *observable* state exact while the allocator stays free inside.
+  (Charter *Test Strategy* for the full contract.)
 - **Pure allocator unit tests** — SSA in → allocation out; assert no live-range
   overlap on a register, correct phi resolution.
 - **Parallel-copy sequencer property tests** — random permutations including
   cycles.
 - **Value-oracle fuzzer** (random pure exprs) extended with random control flow
   (if / loop nests) for 4b, including calls inside loops for 4b.3.
+- **Exception-path tests** — `CATCH`/`THROW`, division-by-zero, and faulting `@`/`!`
+  inside register-allocated loops; assert the data stack restores correctly and any
+  promoted named cell holds its canonical value after `THROW` (charter *Exceptions*).
 - **Static stack-balance check** (from 4a) as a standing gate.
-- **Bench metrics gate** — `hot-mandel-iter`, `fib-iter`, `dot-prod`: fewer
-  instructions/iteration after 4b.3, never a regression.
+- **Bench metrics tripwire** — `hot-mandel-iter`, `fib-iter`, `dot-prod`: fewer
+  instructions/iteration after 4b.3; a corpus-level regression warrants a look —
+  not a per-word gate, codegen changes by design.
 
 ## 9. Milestones & exit criteria (each independently shippable)
 
@@ -185,11 +202,16 @@ after any milestone with a real, correct improvement.
 
 ## 10. Risks & mitigations
 
-- **Silent wrong-stack from allocation bugs** → the byte-for-byte state fuzzer + WF65
+- **Silent wrong-stack from allocation bugs** → the differential state fuzzer + WF65
   oracle is the net; settle-fallback bounds blast radius.
 - **Phi swap/cycle bugs** → dedicated parallel-copy sequencer + property tests.
 - **Loop-carried value across a call** → callee-preserved regs (R13/R14, xmm6–15),
-  the float-pin precedent.
+  the float-pin precedent. *Verify early:* `get-started.md` notes some primitives use
+  R13/R14 across Win64 callouts — the register-reservation audit (§7) must confirm
+  they are free in compiled-body context before the 4b.3 budget commits to them.
+- **Stale promoted variable after `THROW`** → write promoted named cells back before
+  any THROW-capable op (charter *Exceptions*); the heuristic may decline promotion
+  when the write-back cost outweighs the win.
 - **Register pressure / spill thrash** → spill to the value's data-stack slot
   (cheap — it's where it'd live in the naive model); tune the heuristic.
 - **`;` compile cost** → scope is one definition; linear-scan is fast; tier

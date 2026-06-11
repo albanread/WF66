@@ -16,7 +16,7 @@ WF66 is not just a cleaner compiler than WF65 — the target is to out-run the f
 2. **Cross-block register allocation.** The data stack lives in registers *across* `IF`/`THEN`/`BEGIN`/`DO`, reconciled to memory only at spills and word boundaries — the category STC peephole (WF65/WF32/most Forths) structurally cannot reach.
 3. **Inline-and-fold across word boundaries** (token-splice small callees, then fold/CSE/strength-reduce over the former boundary).
 
-The moat: WF65 is a frozen, byte-for-byte **state correctness oracle** — same source must produce the same final stack, touched memory, `rbp`, and scratch state, even when WF66 emits different, faster bytes. Honest ceiling: per-definition, not whole-program — Forth's mutable, runtime-patched dictionary forbids whole-program analysis, a ceiling VFX shares. Full thesis in [wf66_compiler.md](wf66_compiler.md).
+The moat: WF65 is a frozen **differential oracle** — same source must produce the same *observable Forth state* (data stack, program-defined memory, output), even though WF66 emits different, faster bytes and uses registers differently. It is a **cross-check, not the spec**, and it compares semantics, not machine incidentals (see *Test Strategy*): a too-strict oracle that pinned scratch registers, spill memory, or instruction count would forbid the very register allocation that is the point — a false oracle pins you to WF65's wrong places, not just its right ones. Honest ceiling: per-definition, not whole-program — Forth's mutable, runtime-patched dictionary forbids whole-program analysis, a ceiling VFX shares. Full thesis in [wf66_compiler.md](wf66_compiler.md).
 
 ## Carries Over
 
@@ -25,6 +25,15 @@ The moat: WF65 is a frozen, byte-for-byte **state correctness oracle** — same 
 - Register conventions: RAX=TOS, RBP=DSP, RBX=UP, RSP=rstack, R12=save slot.
 - Dictionary, vocabularies, `CREATE`/`DOES>`, live REPL, `lib/core.f`, and the Rust harness.
 - `CODE:` and raw code emission as explicit opaque escape hatches.
+
+## Two Sources of Truth
+
+The kernel `proc … endp` body is the **canonical semantics** of every primitive. WF66 reaches it two ways:
+
+- **Non-inlined `Word`** — *calls the same kernel*, byte-for-byte. Same kernel, same dispatch.
+- **Inlined hot primitive** — spliced from a per-primitive **emit template** (`@`→`mov dst,[src]`, `<`→flags, …) with allocated registers.
+
+The template is a second *representation*, never a second *semantics*: it must stay behavior-equivalent to the `proc` body, enforced by a golden test that runs both and compares observable state (per *Test Strategy*). One source of truth — the kernel — two ways to reach it. Each `Inline(fop)` also declares its `RegEffect{ins, outs, clobbers}` so the allocator can schedule around the template.
 
 ## Replaced
 
@@ -39,6 +48,8 @@ WF65's compiler emits final bytes as soon as each compiling word runs. WF66 redi
 | `;` | close the definition and run the back end |
 
 The replay substrate disappears: `LAST_LIT_*`, `LAST_DUP_END`, `LAST_CMP_*`, `LAST_ADDR_*`, `OPT_FENCE`, `try_fold_literal`, and the rewind tails of the old fold words become unnecessary because optimization sees the completed definition IR.
+
+**Peephole subsumption (assumption).** Compiling through the IR *subsumes the WF65 peephole/replay layer wholesale* — WF66 never runs a peephole pass alongside the IR optimizer; there is no dual path. Every WF65 one-step-lookback rewrite is reimplemented as a whole-definition IR pass (*Back End* step 3; [`wf66_compiler.md`](wf66_compiler.md) §4): constant folding (`try_fold_literal`), two-literal stores, compile-time `/`, the `bl`/`true`/`false` ordering tricks, `imul`-immediate strength reduction, the `LAST_DUP`/`LAST_CMP` compare-and-branch tails, and `LAST_ADDR` load coalescing. Whole-definition visibility makes each strictly stronger than the watermark-limited predecessor it replaces.
 
 ## Compile-Time Vocabulary Contract
 
@@ -95,18 +106,31 @@ The contract is binary:
 - use the compile-time IR-builder vocabulary: participates in optimization
 - cross an opaque/dynamic boundary: settle first, preserve semantics, block optimization across it
 
+## Exceptions (CATCH / THROW)
+
+Register residency must not change exception semantics. Two cases:
+
+- **Anonymous data-stack values are exception-transparent** and need no extra settling. `CATCH` reaches its protected code through `EXECUTE` — an opaque/dynamic boundary that already settles — so the data stack is canonical when the catch frame records its depth. `THROW` restores the data-stack pointer from that frame; any register-resident values in the unwound region necessarily live *above* the restored depth and are discarded — exactly ANS `CATCH`/`THROW` behavior. The return stack and `DO` loop counters stay in memory (never register-allocated; see [`wf66_phase4_plan.md`](wf66_phase4_plan.md) §4b.3), so `THROW`'s return-stack restore is unchanged. **No faulting primitive** (`/`, `mod`, an address-faulting `@`) needs to become a data-stack settle boundary.
+- **Promoted named cells *do* need a write-back.** A `VARIABLE`/`VALUE`/`CREATE` body held in a register (the subsumed `hotvariable` case) is *program-defined memory*, which the oracle compares (*Test Strategy*). Its backing memory must be canonical wherever a `THROW` is observable, so the allocator writes a promoted named cell back to memory **before any THROW-capable operation in its live range** — integer `/`/`mod`, an address-faulting `@`/`!`/`c@`/`c!`, or a non-inlined call. Anonymous values are exempt. This **supersedes** the [`register_pinning_v1`](register_pinning_v1.md) "values stale after exception" caveat: under the stricter observable-memory oracle a stale promoted variable is a divergence, not documented behavior. The promotion heuristic may simply decline to promote a named cell whose range contains THROW-capable ops.
+
 ## Non-Goals
 
 WF66 is not a whole-program batch compiler. That would require amputating the user-programmable compile-time semantics that make Forth Forth. WF66 is an optimizing interactive compiler: per-definition, mutable-dictionary aware, and REPL-friendly.
 
 ## Test Strategy
 
-- Preserve WF65 behavior with the existing harness and data-driven tests.
-- Add pure IR tests for immediate words and user-defined IR macros.
-- Add backend golden tests for generated JASM/MASM text and native bytes.
-- Add differential definition tests: source in, byte-for-byte equivalent final stack/touched-memory/register state out.
+WF65 is a **cross-check, not the specification.** The differential oracle compares the **observable Forth state and nothing else**:
+
+- **Compared (semantic):** the data stack — every live cell and the depth; the return-stack / locals net effect; memory the program *defines* (`VARIABLE`/`VALUE`/`CREATE`/`ALLOT` cells, dictionary writes); and emitted output.
+- **Not compared (implementation freedom):** scratch / caller-clobbered registers, memory below the stack pointer or in spill / scratch regions, padding, uninitialised cells, instruction bytes, and instruction *count*. Pinning any of these is a **false oracle** — it would forbid the register allocation and restructuring that are the whole point.
+- **Not gospel.** Where WF65 disagrees with Forth-2012 (or has a known bug), the standard wins and the divergence is flagged for a human; the oracle never enshrines a WF65 quirk as the spec.
+- **"≥ as optimised" is a tripwire, not a gate** — measured on the bench corpus (throughput / instruction trend). A single word emitting differently-shaped, even locally larger, code is fine when the bench holds. WF66 is free to restructure.
+
+Test layers: the existing harness + data-driven tests; pure IR / optimiser unit tests; backend golden tests (template vs `proc` body, per *Two Sources of Truth*); the **value-oracle fuzzer** (random pure expressions vs an independent Rust evaluator); the **differential state fuzzer** (the contract above) over random control-flow nests; and the static stack-balance check from the front end.
 
 ## First Slice
+
+The full phase / sprint plan is **[wf66_roadmap.md](wf66_roadmap.md)** (Phase 4 detail in **[wf66_phase4_plan.md](wf66_phase4_plan.md)**). The first slice is Phase 0:
 
 1. Add an IR builder object to the compiling state.
 2. Redirect `LITERAL`, `COMPILE,`, `POSTPONE`, and `;` to the builder/finalizer.
