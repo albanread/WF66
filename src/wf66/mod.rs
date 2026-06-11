@@ -941,6 +941,64 @@ pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, Low
     lower(&reduced, fn_name)
 }
 
+// ── Deferred assembly: instruction records (Phase 4b substrate) ─────────────
+//
+// "We have our own assembler, so we defer assembly": instead of handing the
+// lowered text straight to the encoder, we lex it into a buffer of instruction
+// records, (later) reduce that buffer with the same recognize->replace engine
+// at the instruction level, then re-render. Step 1 only proves the round-trip
+// is byte-for-byte identity — `render(parse_instrs(x)) == x` — so introducing
+// the buffer changes nothing until a pass is added. Only the data-stack-pointer
+// adjust is structured for now (what the first rbp-coalescing pass needs); every
+// other line rides as `Raw` verbatim and is promoted as later passes require it.
+
+/// A deferred-assembly instruction record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Instr {
+    /// `add rbp, n` (n>=0) or `sub rbp, -n` (n<0): the DSP adjust.
+    AdjustDsp(i64),
+    /// Any other emitted line, verbatim (without its trailing newline).
+    Raw(String),
+}
+
+/// Lex lowered asm text into instruction records. Only the rbp adjust is
+/// recognized; everything else (including labels and the preamble) is `Raw`.
+fn parse_instrs(asm: &str) -> Vec<Instr> {
+    asm.lines()
+        .map(|line| {
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("add rbp, ") {
+                if let Ok(v) = rest.trim().parse::<i64>() {
+                    return Instr::AdjustDsp(v);
+                }
+            }
+            if let Some(rest) = t.strip_prefix("sub rbp, ") {
+                if let Ok(v) = rest.trim().parse::<i64>() {
+                    return Instr::AdjustDsp(-v);
+                }
+            }
+            Instr::Raw(line.to_string())
+        })
+        .collect()
+}
+
+/// Render instruction records back to asm text. Inverse of [`parse_instrs`]:
+/// `render(parse_instrs(x)) == x`.
+fn render(instrs: &[Instr]) -> String {
+    let mut s = String::new();
+    for i in instrs {
+        match i {
+            Instr::AdjustDsp(n) if *n >= 0 => s.push_str(&format!("    add rbp, {n}\n")),
+            Instr::AdjustDsp(n) => s.push_str(&format!("    sub rbp, {}\n", -n)),
+            Instr::Raw(l) => {
+                s.push_str(l);
+                s.push('\n');
+            }
+        }
+    }
+    s
+}
+
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
 /// i.e. WF66 can lower the whole body. Any `Word`/`Opaque` (an unknown word, an
 /// immediate word's emission, a `CODE:` region) makes the span non-deferrable;
@@ -1002,6 +1060,9 @@ pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
         return Err(CompileError::NotDeferrable);
     }
     let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
+    // Deferred assembly: lex to instruction records, (reduce — later), re-render.
+    // render(parse_instrs(asm)) == asm today, so this is behaviour-identical.
+    let asm = render(&parse_instrs(&asm));
     let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
     let fn_off = *module
         .symbols
@@ -1143,6 +1204,49 @@ mod tests {
         .unwrap();
         assert!(!bytes.is_empty());
         assert!(bytes.contains(&0xC3));
+    }
+
+    // ---- deferred-assembly instruction buffer (Step 1: identity) --------
+
+    #[test]
+    fn instr_roundtrip_is_identity() {
+        // render(parse_instrs(lower(x))) == lower(x) across a spread of shapes
+        // that exercise every emitter (pushes, imm/dup ops, all stack ops, mem,
+        // compares, control flow, pick). This is the "emitter unchanged" proof.
+        let bodies: Vec<Vec<Token>> = vec![
+            vec![Token::Lit(5), Token::Lit(7), Token::Inline(Fop::Add)],
+            vec![Token::Lit(5), Token::Inline(Fop::Mul), Token::Lit(2), Token::Inline(Fop::Add)],
+            vec![Token::Stack(StackOp::Dup), Token::Inline(Fop::Mul)],
+            vec![Token::Stack(StackOp::Rot)],
+            vec![Token::Stack(StackOp::TwoSwap)],
+            vec![Token::Stack(StackOp::TwoOver)],
+            vec![Token::Mem(MemOp::Fetch)],
+            vec![Token::Mem(MemOp::Store)],
+            vec![Token::Cmp(CmpOp::Lt)],
+            vec![
+                Token::CmpCtl(CmpOp::ZeroEq, Ctl::If),
+                Token::Lit(1),
+                Token::Ctl(Ctl::Else),
+                Token::Lit(2),
+                Token::Ctl(Ctl::Then),
+            ],
+            vec![
+                Token::Ctl(Ctl::Begin),
+                Token::ImmOp { op: Fop::Sub, k: 1 },
+                Token::Stack(StackOp::Dup),
+                Token::CmpCtl(CmpOp::ZeroEq, Ctl::Until),
+            ],
+            vec![Token::Pick(3)],
+            vec![Token::Ctl(Ctl::Exit)],
+        ];
+        for b in bodies {
+            let asm = lower(&b, "rt").unwrap();
+            assert_eq!(
+                render(&parse_instrs(&asm)),
+                asm,
+                "round-trip not identity for {b:?}"
+            );
+        }
     }
 
     // ---- unified reduce engine: cascades a fixed pipeline misses ---------
