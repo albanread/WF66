@@ -823,6 +823,13 @@ pub(crate) const USER_WF66_VOC_INVERT: u64 = 0x1A80; // invert-> -1 xor (not)
 pub(crate) const USER_WF66_VOC_IF:   u64 = 0x1A88; // if   (if_word)
 pub(crate) const USER_WF66_VOC_ELSE: u64 = 0x1A90; // else (else_word)
 pub(crate) const USER_WF66_VOC_THEN: u64 = 0x1A98; // then (then_word)
+pub(crate) const USER_WF66_VOC_BEGIN:  u64 = 0x1AA0; // begin  (begin_word)
+pub(crate) const USER_WF66_VOC_UNTIL:  u64 = 0x1AA8; // until  (until_word)
+pub(crate) const USER_WF66_VOC_AGAIN:  u64 = 0x1AB0; // again  (again_word)
+pub(crate) const USER_WF66_VOC_WHILE:  u64 = 0x1AB8; // while  (while_word)
+pub(crate) const USER_WF66_VOC_REPEAT: u64 = 0x1AC0; // repeat (repeat_word)
+pub(crate) const USER_WF66_VOC_ZEQ:    u64 = 0x1AC8; // 0=     (zero_equal)
+pub(crate) const USER_WF66_VOC_ZLT:    u64 = 0x1AD0; // 0<     (zero_less)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1825,6 +1832,21 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_IF, wf66_if);
         session.write_user_u64(USER_WF66_VOC_ELSE, wf66_else);
         session.write_user_u64(USER_WF66_VOC_THEN, wf66_then);
+        // Loops + comparison flags (Phase 4a).
+        let wf66_begin = session.jit.lookup_addr("begin_word").context("wf66 vocab begin_word")?;
+        let wf66_until = session.jit.lookup_addr("until_word").context("wf66 vocab until_word")?;
+        let wf66_again = session.jit.lookup_addr("again_word").context("wf66 vocab again_word")?;
+        let wf66_while = session.jit.lookup_addr("while_word").context("wf66 vocab while_word")?;
+        let wf66_repeat = session.jit.lookup_addr("repeat_word").context("wf66 vocab repeat_word")?;
+        let wf66_zeq = session.jit.lookup_addr("zero_equal").context("wf66 vocab zero_equal")?;
+        let wf66_zlt = session.jit.lookup_addr("zero_less").context("wf66 vocab zero_less")?;
+        session.write_user_u64(USER_WF66_VOC_BEGIN, wf66_begin);
+        session.write_user_u64(USER_WF66_VOC_UNTIL, wf66_until);
+        session.write_user_u64(USER_WF66_VOC_AGAIN, wf66_again);
+        session.write_user_u64(USER_WF66_VOC_WHILE, wf66_while);
+        session.write_user_u64(USER_WF66_VOC_REPEAT, wf66_repeat);
+        session.write_user_u64(USER_WF66_VOC_ZEQ, wf66_zeq);
+        session.write_user_u64(USER_WF66_VOC_ZLT, wf66_zlt);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

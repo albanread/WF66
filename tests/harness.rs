@@ -504,6 +504,32 @@ fn wf66_control_flow_matches_eager_oracle() {
 }
 
 #[test]
+fn wf66_loops_and_compares_match_eager_oracle() {
+    // Phase 4a: BEGIN/UNTIL/AGAIN/WHILE/REPEAT + 0= / 0< compile through WF66.
+    // Comparison flags now let IF and loop conditions be computed.
+    let cases = [
+        (": myabs dup 0< if negate then ;", "-5 myabs .\n5 myabs .\n0 myabs ."),
+        (": iszero 0= ;", "0 iszero .\n5 iszero ."),
+        (": cd begin 1- dup 0= until ;", "5 cd .\n1 cd ."),       // counts down to 0
+        (": cd2 begin dup while 1- repeat ;", "5 cd2 .\n0 cd2 ."), // while loop -> 0
+        (": clamp dup 0< if drop 0 then ;", "-3 clamp .\n4 clamp ."), // max(n,0)
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
 fn wf66_control_flow_actually_rewrites() {
     // Confirm a control-flow definition genuinely goes through WF66 (the body
     // contains a Jcc/jmp from our lowering and differs from the eager body).

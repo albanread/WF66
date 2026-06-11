@@ -952,6 +952,21 @@ fn wf66_ctl_of(up: u64, xt: u64) -> Option<crate::wf66::Ctl> {
         x if x == r(crate::USER_WF66_VOC_IF) => Some(Ctl::If),
         x if x == r(crate::USER_WF66_VOC_ELSE) => Some(Ctl::Else),
         x if x == r(crate::USER_WF66_VOC_THEN) => Some(Ctl::Then),
+        x if x == r(crate::USER_WF66_VOC_BEGIN) => Some(Ctl::Begin),
+        x if x == r(crate::USER_WF66_VOC_UNTIL) => Some(Ctl::Until),
+        x if x == r(crate::USER_WF66_VOC_AGAIN) => Some(Ctl::Again),
+        x if x == r(crate::USER_WF66_VOC_WHILE) => Some(Ctl::While),
+        x if x == r(crate::USER_WF66_VOC_REPEAT) => Some(Ctl::Repeat),
+        _ => None,
+    }
+}
+
+fn wf66_cmp_of(up: u64, xt: u64) -> Option<crate::wf66::CmpOp> {
+    use crate::wf66::CmpOp;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_ZEQ) => Some(CmpOp::ZeroEq),
+        x if x == r(crate::USER_WF66_VOC_ZLT) => Some(CmpOp::ZeroLt),
         _ => None,
     }
 }
@@ -1008,6 +1023,11 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
                 eprintln!("[wf66] word xt={xt:#x} -> {c:?}");
             }
             b.ctl(c);
+        } else if let Some(cmp) = wf66_cmp_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> {cmp:?}");
+            }
+            b.cmp(cmp);
         } else if let Some((k, f)) = wf66_litop_of(up, xt) {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> Lit({k}) {f:?}");

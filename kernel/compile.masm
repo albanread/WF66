@@ -2716,6 +2716,10 @@ proc(pin_begin_maybe)
     jne     .no
     cmp     qword ptr [UP + user_LOCALS_COUNT], 0
     jne     .no
+    ; WF66 capture owns loop bodies while recording — the pin recorder's path
+    ; bypasses the WF66 convergence hooks, so don't arm it here.
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    jne     .no
     mov     qword ptr [UP + user_PIN_RECORDING], 1
     mov     qword ptr [UP + user_PIN_NEST], 1
     mov     qword ptr [UP + user_PIN_BUF_LEN], 0

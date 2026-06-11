@@ -169,6 +169,42 @@ pub enum Ctl {
     If,
     Else,
     Then,
+    Begin,
+    Until,
+    Again,
+    While,
+    Repeat,
+}
+
+/// A flag-producing comparison (Phase 4a). Forth flags are all-bits 0 / -1.
+/// Unary forms only for now (binary `< = >` come later); these are what make
+/// `IF`/`UNTIL`/`WHILE` useful with computed conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    ZeroEq, // 0=  ( n -- flag )
+    ZeroLt, // 0<  ( n -- flag )
+}
+
+impl CmpOp {
+    fn emit(self, out: &mut String) {
+        match self {
+            // n==0 ? -1 : 0
+            CmpOp::ZeroEq => {
+                out.push_str("    test rax, rax\n");
+                out.push_str("    setz al\n");
+                out.push_str("    movzx eax, al\n");
+                out.push_str("    neg rax\n");
+            }
+            // n<0 ? -1 : 0  (smear the sign bit)
+            CmpOp::ZeroLt => out.push_str("    sar rax, 63\n"),
+        }
+    }
+}
+
+/// An open control-flow frame on the lowering control stack.
+enum CtlFrame {
+    If { id: u32, has_else: bool },
+    Begin { id: u32 },
 }
 
 /// One IR token of a straight-line span (charter §2).
@@ -190,6 +226,8 @@ pub enum Token {
     Mem(MemOp),
     /// A structured control-flow marker (Phase 4a).
     Ctl(Ctl),
+    /// A flag-producing comparison (Phase 4a).
+    Cmp(CmpOp),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -230,6 +268,10 @@ impl IrBuilder {
 
     pub fn ctl(&mut self, c: Ctl) {
         self.tokens.push(Token::Ctl(c));
+    }
+
+    pub fn cmp(&mut self, op: CmpOp) {
+        self.tokens.push(Token::Cmp(op));
     }
 
     /// Splice a callee's token body into the current definition (Phase 3
@@ -405,9 +447,9 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     s.push_str(&format!("    .globl {fn_name}\n"));
     s.push_str(&format!("{fn_name}:\n"));
 
-    // Control-flow lowering state: a stack of open IF frames (id, has_else) and
-    // a monotonic id for unique labels within this body.
-    let mut ctl: Vec<(u32, bool)> = Vec::new();
+    // Control-flow lowering state: a stack of open frames and a monotonic id for
+    // unique labels within this body.
+    let mut ctl: Vec<CtlFrame> = Vec::new();
     let mut ctl_id: u32 = 0;
 
     for &t in tokens {
@@ -423,6 +465,7 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             Token::ImmOp { op, k } => emit_imm_op(op, k, &mut s),
             Token::Stack(op) => op.emit(&mut s),
             Token::Mem(op) => op.emit(&mut s),
+            Token::Cmp(op) => op.emit(&mut s),
             Token::Ctl(c) => emit_ctl(c, &mut s, &mut ctl, &mut ctl_id)?,
             Token::Word { .. } | Token::Opaque => return Err(LowerError::Unsupported(t)),
         }
@@ -435,42 +478,82 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     Ok(s)
 }
 
-/// Lower a structured control marker. Settle-everywhere: at IF the flag is the
-/// TOS in `rax`; consuming it is a `drop` (test the saved flag, reload TOS from
-/// memory), then a conditional branch to a rasm label the assembler resolves.
+/// Consume the TOS flag (settle-everywhere): save it in `rcx`, reload TOS from
+/// memory (a drop), and `test` the saved flag so a following `jz` can branch.
+fn emit_consume_flag(out: &mut String) {
+    out.push_str("    mov rcx, rax\n"); // save flag
+    out.push_str("    mov rax, [rbp]\n"); // new TOS = NOS
+    out.push_str(&format!("    add rbp, {CELL}\n")); // drop flag cell
+    out.push_str("    test rcx, rcx\n");
+}
+
+/// Lower a structured control marker against the control stack, emitting rasm
+/// labels the assembler resolves. Mismatched markers (e.g. `THEN` closing a
+/// `BEGIN`) return `UnbalancedControl` so the caller keeps the eager body.
 fn emit_ctl(
     c: Ctl,
     out: &mut String,
-    ctl: &mut Vec<(u32, bool)>,
+    ctl: &mut Vec<CtlFrame>,
     next_id: &mut u32,
 ) -> Result<(), LowerError> {
     match c {
         Ctl::If => {
             let id = *next_id;
             *next_id += 1;
-            // consume the flag (a drop), then branch-if-false past the then-part
-            out.push_str("    mov rcx, rax\n"); // save flag
-            out.push_str("    mov rax, [rbp]\n"); // new TOS = NOS
-            out.push_str(&format!("    add rbp, {CELL}\n")); // drop flag cell
-            out.push_str("    test rcx, rcx\n");
+            emit_consume_flag(out);
             out.push_str(&format!("    jz .wf66_c{id}_f\n"));
-            ctl.push((id, false));
+            ctl.push(CtlFrame::If { id, has_else: false });
         }
-        Ctl::Else => {
-            let (id, has_else) = ctl.last_mut().ok_or(LowerError::UnbalancedControl)?;
-            *has_else = true;
-            let id = *id;
-            out.push_str(&format!("    jmp .wf66_c{id}_e\n")); // then-part done
-            out.push_str(&format!(".wf66_c{id}_f:\n")); // false lands here (else-part)
-        }
-        Ctl::Then => {
-            let (id, has_else) = ctl.pop().ok_or(LowerError::UnbalancedControl)?;
-            if has_else {
-                out.push_str(&format!(".wf66_c{id}_e:\n"));
-            } else {
+        Ctl::Else => match ctl.last_mut() {
+            Some(CtlFrame::If { id, has_else }) => {
+                *has_else = true;
+                let id = *id;
+                out.push_str(&format!("    jmp .wf66_c{id}_e\n"));
                 out.push_str(&format!(".wf66_c{id}_f:\n"));
             }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
+        Ctl::Then => match ctl.pop() {
+            Some(CtlFrame::If { id, has_else }) => {
+                let lbl = if has_else { "e" } else { "f" };
+                out.push_str(&format!(".wf66_c{id}_{lbl}:\n"));
+            }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
+        Ctl::Begin => {
+            let id = *next_id;
+            *next_id += 1;
+            out.push_str(&format!(".wf66_c{id}_top:\n"));
+            ctl.push(CtlFrame::Begin { id });
         }
+        Ctl::Until => match ctl.pop() {
+            Some(CtlFrame::Begin { id }) => {
+                emit_consume_flag(out);
+                out.push_str(&format!("    jz .wf66_c{id}_top\n")); // loop back while false
+            }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
+        Ctl::Again => match ctl.pop() {
+            Some(CtlFrame::Begin { id }) => {
+                out.push_str(&format!("    jmp .wf66_c{id}_top\n"));
+            }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
+        Ctl::While => match ctl.last() {
+            Some(CtlFrame::Begin { id }) => {
+                let id = *id;
+                emit_consume_flag(out);
+                out.push_str(&format!("    jz .wf66_c{id}_exit\n")); // exit while false
+            }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
+        Ctl::Repeat => match ctl.pop() {
+            Some(CtlFrame::Begin { id }) => {
+                out.push_str(&format!("    jmp .wf66_c{id}_top\n"));
+                out.push_str(&format!(".wf66_c{id}_exit:\n"));
+            }
+            _ => return Err(LowerError::UnbalancedControl),
+        },
     }
     Ok(())
 }
@@ -499,6 +582,7 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::Stack(_)
                 | Token::Mem(_)
                 | Token::Ctl(_)
+                | Token::Cmp(_)
         )
     })
 }
@@ -819,6 +903,56 @@ mod tests {
         .unwrap();
         wfasm::rasm::assemble(&asm)
             .unwrap_or_else(|e| panic!("nested if rejected: {e:#}\nasm:\n{asm}"));
+    }
+
+    #[test]
+    fn cmp_and_loops_assemble() {
+        for op in [CmpOp::ZeroEq, CmpOp::ZeroLt] {
+            let asm = lower(&[Token::Cmp(op)], "wf66_t_cmp").unwrap();
+            wfasm::rasm::assemble(&asm).unwrap_or_else(|e| panic!("{op:?}: {e:#}\nasm:\n{asm}"));
+        }
+        // begin 1- dup 0= until
+        let until = lower(
+            &[
+                Token::Ctl(Ctl::Begin),
+                Token::ImmOp { op: Fop::Sub, k: 1 },
+                Token::Stack(StackOp::Dup),
+                Token::Cmp(CmpOp::ZeroEq),
+                Token::Ctl(Ctl::Until),
+            ],
+            "wf66_t_until",
+        )
+        .unwrap();
+        wfasm::rasm::assemble(&until).unwrap_or_else(|e| panic!("until: {e:#}\n{until}"));
+        // begin dup while 1- repeat
+        let whilel = lower(
+            &[
+                Token::Ctl(Ctl::Begin),
+                Token::Stack(StackOp::Dup),
+                Token::Ctl(Ctl::While),
+                Token::ImmOp { op: Fop::Sub, k: 1 },
+                Token::Ctl(Ctl::Repeat),
+            ],
+            "wf66_t_while",
+        )
+        .unwrap();
+        wfasm::rasm::assemble(&whilel).unwrap_or_else(|e| panic!("while: {e:#}\n{whilel}"));
+        // begin again (infinite; assemble only)
+        let again = lower(&[Token::Ctl(Ctl::Begin), Token::Ctl(Ctl::Again)], "wf66_t_again").unwrap();
+        wfasm::rasm::assemble(&again).unwrap();
+    }
+
+    #[test]
+    fn ctl_mismatch_errors() {
+        // BEGIN closed by THEN, or IF closed by UNTIL -> unbalanced.
+        assert_eq!(
+            lower(&[Token::Ctl(Ctl::Begin), Token::Ctl(Ctl::Then)], "x"),
+            Err(LowerError::UnbalancedControl)
+        );
+        assert_eq!(
+            lower(&[Token::Ctl(Ctl::If), Token::Ctl(Ctl::Until)], "x"),
+            Err(LowerError::UnbalancedControl)
+        );
     }
 
     #[test]
