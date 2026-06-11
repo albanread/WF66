@@ -76,13 +76,19 @@ impl Fop {
     }
 }
 
-/// One IR token of a straight-line span (charter §2). Phase 0 subset.
+/// One IR token of a straight-line span (charter §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
     /// Integer literal push.
     Lit(i64),
-    /// An inlinable primitive (lowers to its own instruction).
+    /// An inlinable primitive on the top two stack cells (lowers to its own
+    /// instruction).
     Inline(Fop),
+    /// `op` of the current TOS with an immediate `k` — the result of folding a
+    /// `Lit(k)` into a following `Inline(op)` (Phase 1.2). Lowers to a single
+    /// register-immediate instruction (strength-reduced for `Mul`), with no push
+    /// and no data-stack memory traffic.
+    ImmOp { op: Fop, k: i64 },
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -181,10 +187,68 @@ pub fn const_fold(tokens: &[Token]) -> Vec<Token> {
     out
 }
 
+fn fits_i32(k: i64) -> bool {
+    i32::try_from(k).is_ok()
+}
+
+/// Fold a `Lit(k)` into a following `Inline(op)` (Phase 1.2). `5 *` becomes
+/// `ImmOp{Mul,5}` — one instruction operating on TOS in place — instead of a
+/// literal push plus a memory-operand op. Runs *after* [`const_fold`], so any
+/// `Lit Lit op` has already collapsed; what remains is a literal applied to a
+/// runtime value. Only fires when `k` fits a sign-extended imm32 (the common
+/// case); otherwise the pair stays as settle-everywhere `Lit`+`Inline`.
+///
+/// This subsumes WF65's watermark literal-fold and `imul-immed` peepholes as a
+/// whole-span IR rewrite (charter *Replaced* / *Peephole subsumption*).
+pub fn fold_imm_ops(tokens: &[Token]) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    for &t in tokens {
+        match t {
+            Token::Inline(op) => {
+                if let Some(&Token::Lit(k)) = out.last() {
+                    if fits_i32(k) {
+                        out.pop();
+                        out.push(Token::ImmOp { op, k });
+                        continue;
+                    }
+                }
+                out.push(t);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Lower `op TOS, k` (TOS in `rax`), strength-reducing `Mul` by a constant to
+/// `shl`/`lea`/`neg`/`xor`/nop where possible (WF32's `imul-immed`, as codegen).
+fn emit_imm_op(op: Fop, k: i64, out: &mut String) {
+    match op {
+        Fop::Add => out.push_str(&format!("    add rax, {k}\n")),
+        Fop::Sub => out.push_str(&format!("    sub rax, {k}\n")),
+        Fop::And => out.push_str(&format!("    and rax, {k}\n")),
+        Fop::Or => out.push_str(&format!("    or rax, {k}\n")),
+        Fop::Xor => out.push_str(&format!("    xor rax, {k}\n")),
+        Fop::Mul => match k {
+            0 => out.push_str("    xor eax, eax\n"), // a*0 = 0
+            1 => {}                                  // a*1 = a (nop)
+            -1 => out.push_str("    neg rax\n"),
+            _ if k > 0 && (k & (k - 1)) == 0 => {
+                out.push_str(&format!("    shl rax, {}\n", k.trailing_zeros()));
+            }
+            3 => out.push_str("    lea rax, [rax + rax*2]\n"),
+            5 => out.push_str("    lea rax, [rax + rax*4]\n"),
+            9 => out.push_str("    lea rax, [rax + rax*8]\n"),
+            _ => out.push_str(&format!("    imul rax, rax, {k}\n")),
+        },
+    }
+}
+
 /// Lower a token span to MC-flavour Intel asm text for `wfasm::rasm::assemble`,
-/// matching the LET path's preamble. Naive settle-everywhere codegen: each token
-/// emits its bare native sequence and the body ends in `ret`. The data stack is
-/// the WF65 ABI throughout (RAX=TOS, RBP=DSP).
+/// matching the LET path's preamble. Settle-everywhere codegen: each token emits
+/// its native sequence and the body ends in `ret`. The data stack is the WF65
+/// ABI throughout (RAX=TOS, RBP=DSP). `ImmOp` operates on TOS in a register with
+/// no memory traffic; bare `Inline`/`Lit` still touch the data stack in memory.
 pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     let mut s = String::new();
     s.push_str("    .intel_syntax noprefix\n");
@@ -202,6 +266,7 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
                 s.push_str(&format!("    sub rbp, {CELL}\n"));
             }
             Token::Inline(op) => op.emit_bare(&mut s),
+            Token::ImmOp { op, k } => emit_imm_op(op, k, &mut s),
             Token::Word { .. } | Token::Opaque => return Err(LowerError::Unsupported(t)),
         }
     }
@@ -215,7 +280,8 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
 /// the kernel capture hook lands.
 pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     let folded = const_fold(tokens);
-    lower(&folded, fn_name)
+    let scheduled = fold_imm_ops(&folded);
+    lower(&scheduled, fn_name)
 }
 
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
@@ -225,7 +291,7 @@ pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, Low
 pub fn is_deferrable(tokens: &[Token]) -> bool {
     tokens
         .iter()
-        .all(|t| matches!(t, Token::Lit(_) | Token::Inline(_)))
+        .all(|t| matches!(t, Token::Lit(_) | Token::Inline(_) | Token::ImmOp { .. }))
 }
 
 /// Error from the per-definition finalizer.
@@ -407,6 +473,72 @@ mod tests {
         ])
         .unwrap();
         assert!(!bytes.is_empty());
+        assert!(bytes.contains(&0xC3));
+    }
+
+    // ---- fold_imm_ops + strength reduction (Phase 1.2) ------------------
+
+    #[test]
+    fn imm_ops_fold_literal_into_op() {
+        // 5 * 2 +  ->  ImmOp{Mul,5}, ImmOp{Add,2}  (no pushes left)
+        let ir = const_fold(&[
+            Token::Lit(5),
+            Token::Inline(Fop::Mul),
+            Token::Lit(2),
+            Token::Inline(Fop::Add),
+        ]);
+        assert_eq!(
+            fold_imm_ops(&ir),
+            vec![
+                Token::ImmOp { op: Fop::Mul, k: 5 },
+                Token::ImmOp { op: Fop::Add, k: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn imm_ops_leave_runtime_only_op_alone() {
+        // bare + (both operands runtime) stays an Inline.
+        assert_eq!(fold_imm_ops(&[Token::Inline(Fop::Add)]), vec![Token::Inline(Fop::Add)]);
+    }
+
+    #[test]
+    fn imm_ops_skip_oversized_immediate() {
+        // k beyond imm32 keeps the settle-everywhere Lit+Inline form.
+        let big = i64::from(i32::MAX) + 1;
+        let ir = [Token::Lit(big), Token::Inline(Fop::Add)];
+        assert_eq!(fold_imm_ops(&ir), ir);
+    }
+
+    #[test]
+    fn strength_reduced_multiplies_assemble() {
+        // pow2 -> shl, 3/5/9 -> lea, 0 -> xor, -1 -> neg, other -> imul imm.
+        for k in [0i64, 1, -1, 2, 4, 8, 3, 5, 9, 7, 100] {
+            let asm = lower(&[Token::ImmOp { op: Fop::Mul, k }], "wf66_t_mul").unwrap();
+            wfasm::rasm::assemble(&asm)
+                .unwrap_or_else(|e| panic!("mul k={k} rejected: {e:#}\nasm:\n{asm}"));
+        }
+    }
+
+    #[test]
+    fn imm_arith_ops_assemble() {
+        for op in [Fop::Add, Fop::Sub, Fop::And, Fop::Or, Fop::Xor] {
+            let asm = lower(&[Token::ImmOp { op, k: 7 }], "wf66_t_imm").unwrap();
+            wfasm::rasm::assemble(&asm)
+                .unwrap_or_else(|e| panic!("{op:?} imm rejected: {e:#}\nasm:\n{asm}"));
+        }
+    }
+
+    #[test]
+    fn pipeline_strength_reduces_through_compile_body_bytes() {
+        // : bar 5 * 2 + ;  now lowers via ImmOp (lea + add), still a valid body.
+        let bytes = compile_body_bytes(&[
+            Token::Lit(5),
+            Token::Inline(Fop::Mul),
+            Token::Lit(2),
+            Token::Inline(Fop::Add),
+        ])
+        .unwrap();
         assert!(bytes.contains(&0xC3));
     }
 

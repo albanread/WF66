@@ -157,6 +157,39 @@ fn wf66_non_deferrable_falls_back_to_eager() {
 }
 
 #[test]
+fn wf66_strength_reduce_matches_eager_oracle() {
+    // Phase 1.2: literal-into-op folding + multiply strength reduction. Each of
+    // these compiles to register-immediate code (shl / lea / neg / add / etc.);
+    // the eager compiler is the oracle for correctness over several inputs.
+    let cases = [
+        ": dbl   2 * ;",   // shl rax, 1
+        ": quad  4 * ;",   // shl rax, 2
+        ": tri   3 * ;",   // lea rax,[rax+rax*2]
+        ": pent  5 * ;",   // lea rax,[rax+rax*4]
+        ": tenx 10 * ;",   // imul rax, rax, 10
+        ": negate2 -1 * ;",// neg rax
+        ": zero  0 * ;",   // xor eax, eax
+        ": addk  7 + ;",   // add rax, 7
+        ": subk  4 - ;",   // sub rax, 4
+        ": mix   5 * 2 + ;", // lea + add (n*5+2)
+    ];
+    for def in cases {
+        let word = def.split_whitespace().nth(1).unwrap().to_string();
+        let src = format!("{def}\n3 {word} .\n-7 {word} .\n0 {word} .\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}`");
+    }
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.
