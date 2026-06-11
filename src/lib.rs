@@ -39,6 +39,11 @@ use wfasm::Assembler;
 pub mod let_lang;
 pub mod gc;
 
+// WF66 token-IR optimizing compiler — Rust-side core (roadmap Phase 0). Token IR,
+// const-fold, and lowering, built and unit-tested in isolation ahead of the
+// kernel capture-hook wiring. See docs/design/wf66_charter.md.
+pub mod wf66;
+
 // Optimizer measurement harness (feature = "opt-metrics"). Static, byte-exact
 // codegen metrics over compiled word bodies via the existing debug_words()
 // ranges + an x86 decoder. Drives the bench/ corpus gate and the opt-bench
