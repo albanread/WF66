@@ -228,37 +228,34 @@ fn wf66_size_report() {
             .find_map(|(n, a, b)| if n == name { Some(b - a) } else { None })
             .unwrap_or(0)
     }
-    let defs = [
-        // input-dependent (expect parity with eager's peephole layer)
-        ": dbl 2 * ;",
-        ": bar 5 * 2 + ;",
-        ": poly 3 + 7 * 11 - 13 + 17 * 19 - 23 + ;",
-        // pure compile-time constant expressions (WF66 folds the whole chain to
-        // one push; eager's one-literal watermark cannot)
-        ": k10 2 3 * 4 + ;",
-        ": k6 1 2 + 2 * ;",
-        ": kbig 1000 1000 * ;",
-        ": kchain 5 7 + 11 * 13 - ;",
-        // not eligible (dup) -> falls back, expect identical
-        ": sq dup * ;",
+    // (category, program defining word `w`). 4a is settle-everywhere, so control
+    // flow is ~parity with eager; the wins are whole-span const-fold + inlining.
+    let cases: &[(&str, &str)] = &[
+        ("const-fold", ": w 2 3 * 4 + ;"),
+        ("const-chain", ": w 5 7 + 11 * 13 - ;"),
+        ("derived-fold", ": w 10 1+ ;"),
+        ("inline", ": h 32 ;\n: w h + ;"),
+        ("strength", ": w 5 * 2 + ;"),
+        ("shuffle", ": w dup * ;"),
+        ("cond", ": w dup 0< if negate then ;"),
+        ("loop", ": w begin 1- dup 0= until ;"),
     ];
-    eprintln!("\n  word     eager   wf66   delta");
-    for def in defs {
-        let word = def.split_whitespace().nth(1).unwrap().to_string();
-        let src = format!("{def}\nbye\n");
+    eprintln!("\n  category        eager   wf66   delta");
+    for (cat, prog) in cases {
+        let src = format!("{prog}\nbye\n");
         let eager = {
             let mut s = sess();
             s.eval(&src).unwrap();
-            body_len(&s, &word)
+            body_len(&s, "w")
         };
         let wf66 = {
             let mut s = sess();
             s.set_wf66_enabled(true);
             s.eval(&src).unwrap();
-            body_len(&s, &word)
+            body_len(&s, "w")
         };
         eprintln!(
-            "  {word:<8} {eager:>4}B  {wf66:>4}B   {:+}",
+            "  {cat:<14} {eager:>4}B  {wf66:>4}B   {:+}",
             wf66 as i64 - eager as i64
         );
     }

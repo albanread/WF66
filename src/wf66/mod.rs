@@ -220,6 +220,12 @@ pub enum Token {
     /// register-immediate instruction (strength-reduced for `Mul`), with no push
     /// and no data-stack memory traffic.
     ImmOp { op: Fop, k: i64 },
+    /// `dup` immediately followed by a binary op — TOS combined with itself
+    /// (the result of fusing `[Stack(Dup), Inline(op)]`). `dup +` -> `add rax,rax`,
+    /// `dup *` -> `imul rax,rax` (square), `dup xor`/`dup -` -> 0, `dup and`/
+    /// `dup or` -> nop. Matches WF65's dup-fuse peephole so shuffle+op stops
+    /// regressing vs eager under settle-everywhere lowering.
+    DupOp(Fop),
     /// A stack-shuffle primitive (Phase 1.1).
     Stack(StackOp),
     /// A memory access primitive (Phase 2.1).
@@ -411,6 +417,34 @@ pub fn fold_imm_ops(tokens: &[Token]) -> Vec<Token> {
     out
 }
 
+/// Fuse `dup` followed by a binary op into a single self-combining instruction
+/// (`[Stack(Dup), Inline(op)]` -> `DupOp(op)`). Matches WF65's dup-fuse so a
+/// shuffle+op no longer regresses vs eager under settle-everywhere lowering.
+pub fn fold_dup_op(tokens: &[Token]) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    for &t in tokens {
+        if let Token::Inline(op) = t {
+            if matches!(out.last(), Some(Token::Stack(StackOp::Dup))) {
+                out.pop();
+                out.push(Token::DupOp(op));
+                continue;
+            }
+        }
+        out.push(t);
+    }
+    out
+}
+
+/// Lower `op TOS, TOS` (TOS in `rax`): the value combined with itself.
+fn emit_dup_op(op: Fop, out: &mut String) {
+    match op {
+        Fop::Add => out.push_str("    add rax, rax\n"), // a+a = 2a
+        Fop::Mul => out.push_str("    imul rax, rax\n"), // a*a = a^2
+        Fop::And | Fop::Or => {}                          // a&a = a, a|a = a (nop)
+        Fop::Sub | Fop::Xor => out.push_str("    xor eax, eax\n"), // a-a = 0, a^a = 0
+    }
+}
+
 /// Lower `op TOS, k` (TOS in `rax`), strength-reducing `Mul` by a constant to
 /// `shl`/`lea`/`neg`/`xor`/nop where possible (WF32's `imul-immed`, as codegen).
 fn emit_imm_op(op: Fop, k: i64, out: &mut String) {
@@ -463,6 +497,7 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             }
             Token::Inline(op) => op.emit_bare(&mut s),
             Token::ImmOp { op, k } => emit_imm_op(op, k, &mut s),
+            Token::DupOp(op) => emit_dup_op(op, &mut s),
             Token::Stack(op) => op.emit(&mut s),
             Token::Mem(op) => op.emit(&mut s),
             Token::Cmp(op) => op.emit(&mut s),
@@ -565,7 +600,8 @@ pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, Low
     let folded = const_fold(tokens);
     let pruned = dce(&folded);
     let scheduled = fold_imm_ops(&pruned);
-    lower(&scheduled, fn_name)
+    let fused = fold_dup_op(&scheduled);
+    lower(&fused, fn_name)
 }
 
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
@@ -579,6 +615,7 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
             Token::Lit(_)
                 | Token::Inline(_)
                 | Token::ImmOp { .. }
+                | Token::DupOp(_)
                 | Token::Stack(_)
                 | Token::Mem(_)
                 | Token::Ctl(_)
@@ -1020,6 +1057,39 @@ mod tests {
         // 5 + drop consumes the entry value — not removable.
         let ir = [Token::Lit(5), Token::Inline(Fop::Add), Token::Stack(StackOp::Drop)];
         assert_eq!(dce(&ir), ir.to_vec());
+    }
+
+    // ---- dup+op fusion (regression fix) --------------------------------
+
+    #[test]
+    fn dup_op_fuses() {
+        // dup * -> DupOp(Mul); the lone-token cases too.
+        assert_eq!(
+            fold_dup_op(&[Token::Stack(StackOp::Dup), Token::Inline(Fop::Mul)]),
+            vec![Token::DupOp(Fop::Mul)]
+        );
+        // a non-dup op is left alone
+        assert_eq!(
+            fold_dup_op(&[Token::Inline(Fop::Add)]),
+            vec![Token::Inline(Fop::Add)]
+        );
+    }
+
+    #[test]
+    fn dup_op_lowerings_assemble() {
+        for op in [Fop::Add, Fop::Sub, Fop::Mul, Fop::And, Fop::Or, Fop::Xor] {
+            let asm = lower(&[Token::DupOp(op)], "wf66_t_dupop").unwrap();
+            wfasm::rasm::assemble(&asm)
+                .unwrap_or_else(|e| panic!("dup {op:?}: {e:#}\nasm:\n{asm}"));
+        }
+    }
+
+    #[test]
+    fn dup_mul_is_compact() {
+        // The regression case: dup * must fuse to a tiny body (imul rax,rax; ret).
+        let bytes =
+            compile_body_bytes(&[Token::Stack(StackOp::Dup), Token::Inline(Fop::Mul)]).unwrap();
+        assert!(bytes.len() <= 8, "dup * should be tiny, got {} bytes: {bytes:02x?}", bytes.len());
     }
 
     // ---- stack shuffles (Phase 1.1) ------------------------------------
