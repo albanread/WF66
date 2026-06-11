@@ -530,6 +530,42 @@ fn wf66_loops_and_compares_match_eager_oracle() {
 }
 
 #[test]
+fn wf66_binary_compares_match_eager_oracle() {
+    // Binary comparisons: materialized (return the flag) and fused (cmp -> branch).
+    let cases = [
+        // materialized
+        (": w < ;", "3 7 w .\n7 3 w ."),
+        (": w = ;", "5 5 w .\n5 6 w ."),
+        (": w u< ;", "3 7 w .\n-1 7 w ."),
+        // fused compare -> branch
+        (": w = if 11 else 22 then ;", "5 5 w .\n5 6 w ."),
+        (": w < if 1 else 0 then ;", "3 7 w .\n7 3 w ."),
+        (": w > if 1 else 0 then ;", "7 3 w .\n3 7 w ."),
+        (": w <= if 1 else 0 then ;", "3 3 w .\n4 3 w ."),
+        (": w >= if 1 else 0 then ;", "3 3 w .\n2 3 w ."),
+        (": w <> if 1 else 0 then ;", "3 4 w .\n3 3 w ."),
+        (": w u< if 1 else 0 then ;", "3 7 w .\n-1 7 w ."),
+        (": w 0> if 1 else 0 then ;", "5 w .\n-5 w .\n0 w ."),
+        (": w 0<> if 1 else 0 then ;", "5 w .\n0 w ."),
+        // binary compare feeding a loop condition (fused > while)
+        (": w begin 1- dup 0 > while repeat ;", "5 w .\n1 w ."),
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
 fn wf66_control_flow_actually_rewrites() {
     // Confirm a control-flow definition genuinely goes through WF66 (the body
     // contains a Jcc/jmp from our lowering and differs from the eager body).
@@ -586,7 +622,7 @@ fn wf66_differential_fuzzer() {
                 kinds.extend_from_slice(&[1, 2, 3, 4]); // unary net0, dup, drop, balanced-if
             }
             if depth >= 2 {
-                kinds.extend_from_slice(&[5, 6, 7, 8, 9, 10]); // binary, over, swap/nip, tuck, 2dup, 2drop
+                kinds.extend_from_slice(&[5, 6, 7, 8, 9, 10, 16, 17]); // +binary-cmp, +fused-cmp-if
             }
             if depth >= 3 {
                 kinds.extend_from_slice(&[11, 12]); // rot, -rot
@@ -653,6 +689,17 @@ fn wf66_differential_fuzzer() {
                 15 => {
                     out.push("2nip".into());
                     depth -= 2;
+                }
+                16 => {
+                    // binary comparison, materialized ( a b -- flag )
+                    out.push(pick(rng, &["=", "<>", "<", ">", "<=", ">=", "u<", "u>"]).to_string());
+                    depth -= 1;
+                }
+                17 => {
+                    // fused compare->branch, balanced (net 0): 2dup <cmp> if <netop> then
+                    let cmp = pick(rng, &["=", "<>", "<", ">", "<=", ">=", "u<", "u>"]);
+                    let op = pick(rng, &net0);
+                    out.push(format!("2dup {cmp} if {op} then"));
                 }
                 _ => {}
             }

@@ -245,27 +245,80 @@ pub enum Ctl {
 }
 
 /// A flag-producing comparison (Phase 4a). Forth flags are all-bits 0 / -1.
-/// Unary forms only for now (binary `< = >` come later); these are what make
-/// `IF`/`UNTIL`/`WHILE` useful with computed conditions.
+/// Unary forms compare TOS with 0; binary forms compare NOS (`a`) with TOS
+/// (`b`), flag = `a REL b`. When immediately consumed by `IF`/`UNTIL`/`WHILE`
+/// these fuse to a branch off the operands directly (no materialized boolean).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpOp {
-    ZeroEq, // 0=  ( n -- flag )
-    ZeroLt, // 0<  ( n -- flag )
+    // unary ( n -- flag ) : n vs 0
+    ZeroEq,
+    ZeroNe,
+    ZeroLt,
+    ZeroGt,
+    // binary ( a b -- flag ) : a vs b
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    ULt,
+    UGt,
 }
 
 impl CmpOp {
-    fn emit(self, out: &mut String) {
+    fn is_binary(self) -> bool {
+        use CmpOp as C;
+        matches!(self, C::Eq | C::Ne | C::Lt | C::Gt | C::Le | C::Ge | C::ULt | C::UGt)
+    }
+
+    /// setcc suffix for materializing the flag (after `test`/`cmp`).
+    fn setcc(self) -> &'static str {
+        use CmpOp as C;
         match self {
-            // n==0 ? -1 : 0
-            CmpOp::ZeroEq => {
-                out.push_str("    test rax, rax\n");
-                out.push_str("    setz al\n");
-                out.push_str("    movzx eax, al\n");
-                out.push_str("    neg rax\n");
-            }
-            // n<0 ? -1 : 0  (smear the sign bit)
-            CmpOp::ZeroLt => out.push_str("    sar rax, 63\n"),
+            C::ZeroEq | C::Eq => "e",
+            C::ZeroNe | C::Ne => "ne",
+            C::ZeroLt | C::Lt => "l",
+            C::ZeroGt | C::Gt => "g",
+            C::Le => "le",
+            C::Ge => "ge",
+            C::ULt => "b",
+            C::UGt => "a",
         }
+    }
+
+    /// jcc suffix for the fused branch: jump when the flag would be FALSE (the
+    /// inverse condition), so the control word skips/exits/loops correctly.
+    fn inv_jcc(self) -> &'static str {
+        use CmpOp as C;
+        match self {
+            C::ZeroEq | C::Eq => "ne",
+            C::ZeroNe | C::Ne => "e",
+            C::ZeroLt | C::Lt => "ge",
+            C::ZeroGt | C::Gt => "le",
+            C::Le => "g",
+            C::Ge => "l",
+            C::ULt => "ae",
+            C::UGt => "be",
+        }
+    }
+
+    /// Materialize the -1/0 flag in `rax` (the non-fused case).
+    fn emit(self, out: &mut String) {
+        if matches!(self, CmpOp::ZeroLt) {
+            out.push_str("    sar rax, 63\n"); // n<0 -> all-ones, cheapest form
+            return;
+        }
+        if self.is_binary() {
+            out.push_str("    mov rcx, [rbp]\n"); // a
+            out.push_str(&format!("    add rbp, {CELL}\n")); // drop NOS (2 in, 1 out)
+            out.push_str("    cmp rcx, rax\n"); // a vs b
+        } else {
+            out.push_str("    test rax, rax\n"); // n vs 0
+        }
+        out.push_str(&format!("    set{} al\n", self.setcc()));
+        out.push_str("    movzx eax, al\n");
+        out.push_str("    neg rax\n");
     }
 }
 
@@ -641,28 +694,33 @@ fn emit_cmp_ctl(
     stack: &mut Vec<CtlFrame>,
     next_id: &mut u32,
 ) -> Result<(), LowerError> {
-    emit_consume_flag(out); // here the "flag" is really the comparison operand
-    let jcc = match c {
-        CmpOp::ZeroEq => "jnz", // flag=(op==0); branch when op!=0
-        CmpOp::ZeroLt => "jns", // flag=(op<0);  branch when op>=0
-    };
+    if c.is_binary() {
+        // ( a b -- ) : compare NOS vs TOS, consume both, branch off the flags
+        out.push_str("    mov rcx, [rbp]\n"); // a
+        out.push_str("    cmp rcx, rax\n"); // a vs b (flags)
+        out.push_str(&format!("    mov rax, [rbp + {CELL}]\n")); // new TOS = NNOS
+        out.push_str(&format!("    lea rbp, [rbp + {}]\n", 2 * CELL)); // drop 2, keep flags
+    } else {
+        emit_consume_flag(out); // consume the operand, `test` it
+    }
+    let jcc = c.inv_jcc();
     match ctl {
         Ctl::If => {
             let id = *next_id;
             *next_id += 1;
-            out.push_str(&format!("    {jcc} .wf66_c{id}_f\n"));
+            out.push_str(&format!("    j{jcc} .wf66_c{id}_f\n"));
             stack.push(CtlFrame::If { id, has_else: false });
         }
         Ctl::Until => match stack.pop() {
             Some(CtlFrame::Begin { id }) => {
-                out.push_str(&format!("    {jcc} .wf66_c{id}_top\n"));
+                out.push_str(&format!("    j{jcc} .wf66_c{id}_top\n"));
             }
             _ => return Err(LowerError::UnbalancedControl),
         },
         Ctl::While => match stack.last() {
             Some(CtlFrame::Begin { id }) => {
                 let id = *id;
-                out.push_str(&format!("    {jcc} .wf66_c{id}_exit\n"));
+                out.push_str(&format!("    j{jcc} .wf66_c{id}_exit\n"));
             }
             _ => return Err(LowerError::UnbalancedControl),
         },
@@ -1264,6 +1322,34 @@ mod tests {
             )
             .unwrap();
             wfasm::rasm::assemble(&utl).unwrap_or_else(|e| panic!("{c:?} until: {e:#}\n{utl}"));
+        }
+    }
+
+    #[test]
+    fn binary_compares_assemble() {
+        let all = [
+            CmpOp::ZeroNe,
+            CmpOp::ZeroGt,
+            CmpOp::Eq,
+            CmpOp::Ne,
+            CmpOp::Lt,
+            CmpOp::Gt,
+            CmpOp::Le,
+            CmpOp::Ge,
+            CmpOp::ULt,
+            CmpOp::UGt,
+        ];
+        for c in all {
+            // materialized
+            let m = lower(&[Token::Cmp(c)], "wf66_t_bc").unwrap();
+            wfasm::rasm::assemble(&m).unwrap_or_else(|e| panic!("{c:?} mat: {e:#}\n{m}"));
+            // fused with IF
+            let f = lower(
+                &[Token::CmpCtl(c, Ctl::If), Token::Lit(1), Token::Ctl(Ctl::Then)],
+                "wf66_t_bcf",
+            )
+            .unwrap();
+            wfasm::rasm::assemble(&f).unwrap_or_else(|e| panic!("{c:?} fused: {e:#}\n{f}"));
         }
     }
 

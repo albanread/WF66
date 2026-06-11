@@ -838,6 +838,16 @@ pub(crate) const USER_WF66_VOC_2DROP:  u64 = 0x1AF8; // 2drop (two_drop)
 pub(crate) const USER_WF66_VOC_2SWAP:  u64 = 0x1B00; // 2swap (two_swap)
 pub(crate) const USER_WF66_VOC_2OVER:  u64 = 0x1B08; // 2over (two_over)
 pub(crate) const USER_WF66_VOC_2NIP:   u64 = 0x1B10; // 2nip  (two_nip)
+pub(crate) const USER_WF66_VOC_ZNE: u64 = 0x1B18; // 0<>  (zero_not_equal)
+pub(crate) const USER_WF66_VOC_ZGT: u64 = 0x1B20; // 0>   (zero_greater)
+pub(crate) const USER_WF66_VOC_EQ:  u64 = 0x1B28; // =    (equal)
+pub(crate) const USER_WF66_VOC_NE:  u64 = 0x1B30; // <>   (not_equal)
+pub(crate) const USER_WF66_VOC_LT:  u64 = 0x1B38; // <    (less)
+pub(crate) const USER_WF66_VOC_GT:  u64 = 0x1B40; // >    (greater)
+pub(crate) const USER_WF66_VOC_LE:  u64 = 0x1B48; // <=   (less_equal)
+pub(crate) const USER_WF66_VOC_GE:  u64 = 0x1B50; // >=   (greater_equal)
+pub(crate) const USER_WF66_VOC_ULT: u64 = 0x1B58; // u<   (u_less)
+pub(crate) const USER_WF66_VOC_UGT: u64 = 0x1B60; // u>   (u_greater)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1872,6 +1882,27 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_2SWAP, wf66_2swap);
         session.write_user_u64(USER_WF66_VOC_2OVER, wf66_2over);
         session.write_user_u64(USER_WF66_VOC_2NIP, wf66_2nip);
+        // Comparisons (unary 0<> 0> ; binary = <> < > <= >= u< u>).
+        let wf66_zne = session.jit.lookup_addr("zero_not_equal").context("wf66 vocab zero_not_equal")?;
+        let wf66_zgt = session.jit.lookup_addr("zero_greater").context("wf66 vocab zero_greater")?;
+        let wf66_eq = session.jit.lookup_addr("equal").context("wf66 vocab equal")?;
+        let wf66_ne = session.jit.lookup_addr("not_equal").context("wf66 vocab not_equal")?;
+        let wf66_lt = session.jit.lookup_addr("less").context("wf66 vocab less")?;
+        let wf66_gt = session.jit.lookup_addr("greater").context("wf66 vocab greater")?;
+        let wf66_le = session.jit.lookup_addr("less_equal").context("wf66 vocab less_equal")?;
+        let wf66_ge = session.jit.lookup_addr("greater_equal").context("wf66 vocab greater_equal")?;
+        let wf66_ult = session.jit.lookup_addr("u_less").context("wf66 vocab u_less")?;
+        let wf66_ugt = session.jit.lookup_addr("u_greater").context("wf66 vocab u_greater")?;
+        session.write_user_u64(USER_WF66_VOC_ZNE, wf66_zne);
+        session.write_user_u64(USER_WF66_VOC_ZGT, wf66_zgt);
+        session.write_user_u64(USER_WF66_VOC_EQ, wf66_eq);
+        session.write_user_u64(USER_WF66_VOC_NE, wf66_ne);
+        session.write_user_u64(USER_WF66_VOC_LT, wf66_lt);
+        session.write_user_u64(USER_WF66_VOC_GT, wf66_gt);
+        session.write_user_u64(USER_WF66_VOC_LE, wf66_le);
+        session.write_user_u64(USER_WF66_VOC_GE, wf66_ge);
+        session.write_user_u64(USER_WF66_VOC_ULT, wf66_ult);
+        session.write_user_u64(USER_WF66_VOC_UGT, wf66_ugt);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

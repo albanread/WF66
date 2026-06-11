@@ -975,6 +975,16 @@ fn wf66_cmp_of(up: u64, xt: u64) -> Option<crate::wf66::CmpOp> {
     match xt {
         x if x == r(crate::USER_WF66_VOC_ZEQ) => Some(CmpOp::ZeroEq),
         x if x == r(crate::USER_WF66_VOC_ZLT) => Some(CmpOp::ZeroLt),
+        x if x == r(crate::USER_WF66_VOC_ZNE) => Some(CmpOp::ZeroNe),
+        x if x == r(crate::USER_WF66_VOC_ZGT) => Some(CmpOp::ZeroGt),
+        x if x == r(crate::USER_WF66_VOC_EQ) => Some(CmpOp::Eq),
+        x if x == r(crate::USER_WF66_VOC_NE) => Some(CmpOp::Ne),
+        x if x == r(crate::USER_WF66_VOC_LT) => Some(CmpOp::Lt),
+        x if x == r(crate::USER_WF66_VOC_GT) => Some(CmpOp::Gt),
+        x if x == r(crate::USER_WF66_VOC_LE) => Some(CmpOp::Le),
+        x if x == r(crate::USER_WF66_VOC_GE) => Some(CmpOp::Ge),
+        x if x == r(crate::USER_WF66_VOC_ULT) => Some(CmpOp::ULt),
+        x if x == r(crate::USER_WF66_VOC_UGT) => Some(CmpOp::UGt),
         _ => None,
     }
 }
