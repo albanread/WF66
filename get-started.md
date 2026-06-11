@@ -41,7 +41,6 @@ E:\WF64\
 ├── Cargo.toml                  depends on wfasm (path = "../JASM/rust") and newgc-core (path = "../NewGC/newgc-core")
 ├── README.md                   public-facing intro
 ├── get-started.md              this file
-├── docs/MILESTONES.md          M1–M7 roadmap with status
 │
 ├── .claude/skills/jasm-forth/
 │   └── SKILL.md                day-to-day mechanics, auto-loads in this dir
@@ -168,7 +167,6 @@ When you encounter an oddity or bug, fix it in WF64 and document the local reaso
 | [`E:\JASM\rust\USER-GUIDE.md`](file:///E:/JASM/rust/USER-GUIDE.md) | JASM language reference (directives, macros, scope rules) |
 | [`E:\JASM\rust\README.md`](file:///E:/JASM/rust/README.md) | JASM architecture overview |
 | [`.claude/skills/jasm-forth/SKILL.md`](.claude/skills/jasm-forth/SKILL.md) | Day-to-day mechanics (auto-loads in-project) |
-| [`docs/MILESTONES.md`](docs/MILESTONES.md) | M1–M7 roadmap with status |
 | [forth-standard.org](https://forth-standard.org/) | ANS / Forth 2012 standard |
 
 ---

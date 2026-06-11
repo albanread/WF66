@@ -25,7 +25,7 @@ cargo test --no-run         # confirms the build is clean
 cargo test 2>&1 | Select-Object -Last 5   # confirms tests pass
 ```
 
-Then read `get-started.md` at the project root for the current layout, register conventions, and milestone status. See `docs/MILESTONES.md` for what's done and what's next.
+Then read `get-started.md` at the project root for the current layout, register conventions, and milestone status (the M1–M7 status snapshot lives in its §8).
 
 ## Live Forth workflow (preferred once the layer exists)
 
@@ -264,8 +264,7 @@ The Rust runtime functions are declared in `kernel/runtime_decls.masm` (`@extern
 
 ## See also
 
-- `get-started.md` (project root) — current layout, milestone status, where to look first
-- `docs/MILESTONES.md` — M1–M7 roadmap
+- `get-started.md` (project root) — current layout, milestone status (§8), where to look first
 - `E:\JASM\rust\USER-GUIDE.md` — the JASM language reference (directives, macros, scope rules, the lot)
 - `E:\JASM\rust\README.md` — JASM architecture overview
 - `src/lib.rs` and `tests/harness.rs` — the active behavioral contract for the system
