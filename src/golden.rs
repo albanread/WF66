@@ -1,9 +1,9 @@
-//! Golden capture — the LLVM-MC byte oracle for the Rasm migration (Sprint 0).
+//! Golden capture — the byte oracle for the Rasm migration (Sprint 0).
 //!
-//! Captures the exact machine-code bytes LLVM-MC emitted for every
+//! Captures the exact machine-code bytes emitted for every
 //! assembler-emitted kernel symbol (`forth_main` + every primitive + every
-//! helper), keyed by name. This is **irreplaceable**: once `wfasm/src/llvm.rs`
-//! is deleted there is no way to recover "what LLVM emitted", and the existing
+//! helper), keyed by name. This is **irreplaceable**:
+//! and the existing
 //! `bench/baseline` corpus only covers ~10 compiled `.f` files, not the
 //! primitives. Sprint 2 diffs the native `RasmEncoder` against this golden,
 //! per symbol, to prove byte-identity.
@@ -54,7 +54,7 @@ pub fn kernel_symbol_names() -> Vec<String> {
     names
 }
 
-/// Capture the per-symbol golden from a live (LLVM-built) session.
+/// Capture the per-symbol golden from a live session.
 pub fn capture(session: &mut Wf64Session) -> Result<BTreeMap<String, SymbolGolden>> {
     let names = kernel_symbol_names();
 
@@ -171,7 +171,7 @@ fn normalize(code: &[u8], start: u64, region_start: u64, region_end: u64) -> (Ve
 
 /// Assemble the kernel with the native `RasmEncoder` and return a divergence
 /// report vs the committed golden — empty `Vec` means byte-identical to
-/// LLVM-MC. Used by the `rasm-diff` binary (verbose) and the byte-identity
+/// Used by the `rasm-diff` binary (verbose) and the byte-identity
 /// regression test. `kernel_path` is the kernel entry (`kernel/main.masm`).
 pub fn rasm_divergent_symbols(kernel_path: &std::path::Path) -> Result<Vec<String>> {
     use std::collections::BTreeMap;

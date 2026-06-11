@@ -176,6 +176,6 @@ Optional shoulders to climb:
 - **Forth source library** — `tasks.fs`, `editor.fs`, `assembler.fs`
   (Forth-level assembler that emits via the colon-def compiler),
   `recognizers.fs`.
-- **AOT** — extend JASM to emit `.o` files via LLVM MC, link via
+- **AOT** — extend JASM to emit `.o` files, link via
   Rust's MSVC linker, produce a standalone `wf64-kernel.exe` with no
   Rust runtime. Optional; the embed mode already gives a single .exe.

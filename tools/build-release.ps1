@@ -77,7 +77,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Copy-Item $exe (Join-Path $OutDir 'wf64-ui.exe')
 Write-Host "[release] staged wf64-ui.exe"
 
-# Runtime DLLs.  JASM dynamically links LLVM-C.dll; the shipped
+# Runtime DLLs. The shipped
 # folder must include every DLL the binary depends on or the user
 # gets a "missing module" error on launch.  Cargo drops them in
 # the same folder as the exe.
@@ -157,7 +157,6 @@ to browse pages.  No external viewer required.
 Layout
 ------
     wf64-ui.exe   - the IDE binary (drag a shortcut to your desktop)
-    LLVM-C.dll    - LLVM runtime (must stay alongside wf64-ui.exe)
     kernel\       - JIT-assembled Forth primitives (loaded at boot)
     lib\          - Forth standard library (core.f)
     demos\        - sample programs reachable via the Demos menu

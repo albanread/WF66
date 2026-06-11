@@ -23,8 +23,8 @@ use wf64::Wf64Session;
 /// test via `sess()`. Each `#[test]` call grabs the lock, gets a
 /// freshly-`reset()`-ed session, and drops the guard on the way out.
 ///
-/// Why: each `with_kernel` boot does JASM expansion + LLVM module
-/// load + MCJIT finalize + extern binding + symbol registration + the
+/// Why: each `with_kernel` boot does JASM expansion + module
+/// load + native finalize + extern binding + symbol registration + the
 /// 45-call dictionary bootstrap. With ~50 tests that boot cost dominated
 /// total run time many times over. Reusing the session collapses it to
 /// a one-time cost amortised across the suite, while `reset()` makes
@@ -2456,9 +2456,8 @@ fn code_dsl_compiled_into_colon_definition() {
 
 #[test]
 fn code_dsl_invalid_asm_reports_throw() {
-    // Bad mnemonics inside a CODE: body used to abort the test process
-    // (LLVM-MC's default error handling).  With wfasm's diagnostic
-    // handler installed, MC parse errors flow back through JitError::Llvm
+    // Bad mnemonics inside a CODE: body used to abort the test process.
+    // With wfasm's diagnostic handler installed, parse errors flow back
     // and surface as a Forth THROW.
     let mut s = sess();
     let err = s.eval("CODE: bad  wibblywobbly ;CODE\nbye\n").unwrap_err();

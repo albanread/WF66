@@ -1,143 +1,115 @@
-# WF66 — Token-IR Optimizing Forth Compiler (project charter)
+# WF66 - IR-Builder Optimizing Forth Compiler
 
-Status: **charter / design.** Successor to WF65. Supersedes the WF65 optimizer
-line (`jasm_forth_optimizer_v1.md`, `jasm_forth_optimizer_v2.md`) by replacing
-its *architecture*, not patching it. WF65 is frozen and complete; it is WF66's
-correctness oracle (§7).
+Status: charter / design. WF66 keeps WF65's working Forth runtime and replaces the compilation product: compile-time words build per-definition IR instead of emitting final bytes immediately.
 
-## 0. Thesis (one line)
+Full codegen / optimizer / register-allocation design: [wf66_compiler.md](wf66_compiler.md).
 
-WF65 emits code eagerly and then **replays** (rewind + rewrite) to fold; WF66
-captures each definition as a **token IR, optimizes the tokens as data, and only
-then generates code.** Optimization moves from a pile of stateless one-step
-peephole rewrites to a pure, testable, multi-pass data transform.
+## Thesis
 
-## 1. Carries over vs. replaced
+Forth has no clean offline parse phase. Immediate words are executable compiler extensions: `IF`, `LITERAL`, `POSTPONE`, `;`, and user-defined immediate words run while source is being consumed. WF66 therefore does not replace the outer interpreter. The outer interpreter remains the front end, and the compile-time vocabulary becomes the IR-builder API.
 
-**Carries over (proven in WF65, reused as-is):**
+## Performance goal
 
-- JASM macro assembler + LLVM-MC encoding + MCJIT.
-- The STC runtime: every primitive a `proc…endp` body; CPU `call`/`ret` *is*
-  the dispatch.
-- Register conventions — RAX=TOS, RBP=DSP, RBX=UP, RSP=rstack, R12=save slot.
-- The kernel primitive bodies (`+ * dup @ ! …`): they stay the source of truth
-  for semantics **and** supply the byte recipes the back-end lowers to.
-- Dictionary, headers, `create`/`does>`, the live REPL + `lib/core.f` growth.
-- The Rust harness pattern (`Wf64Session`, data-driven `.t`/`.in`/`.out`).
+WF66 is not just a cleaner compiler than WF65 — the target is to out-run the field (STC peephole Forths, VM-hosted Forths, and VFX/SwiftForth-class native Forths). Three factors, multiplied:
 
-**Replaced (the WF65 compiler/optimizer):**
+1. **Native impedance.** Every primitive lowers to its own instruction — `@`→`mov`, `<`→flags, `>r`→`push`, floats→xmm — never boxed, no VM-call tax. (This is what beats Factor / VM-hosted Forths; cf. the mandelbrot result.)
+2. **Cross-block register allocation.** The data stack lives in registers *across* `IF`/`THEN`/`BEGIN`/`DO`, reconciled to memory only at spills and word boundaries — the category STC peephole (WF65/WF32/most Forths) structurally cannot reach.
+3. **Inline-and-fold across word boundaries** (token-splice small callees, then fold/CSE/strength-reduce over the former boundary).
 
-- The single-forward-pass colon compiler's *immediate* codegen.
-- The entire **replay substrate**: `LAST_LIT_*`, `LAST_DUP_END`, `LAST_CMP_*`,
-  `LAST_ADDR_*`, `OPT_FENCE`, `try_fold_literal`, and the rewind tail of every
-  `fold_*_comp`.
-- The v2 streaming `StackCache` (designed, never built) — superseded by the
-  token-IR buffer, which is more powerful and easier to test.
+The moat: WF65 is a frozen, byte-for-byte **state correctness oracle** — same source must produce the same final stack, touched memory, `rbp`, and scratch state, even when WF66 emits different, faster bytes. Honest ceiling: per-definition, not whole-program — Forth's mutable, runtime-patched dictionary forbids whole-program analysis, a ceiling VFX shares. Full thesis in [wf66_compiler.md](wf66_compiler.md).
 
-## 2. The token IR
+## Carries Over
 
-While compiling a straight-line span, a definition body is captured as an array
-of typed tokens:
+- JASM/Rasm native assembler and loader.
+- STC runtime: every primitive is a `proc ... endp` body; CPU `call`/`ret` is dispatch.
+- Register conventions: RAX=TOS, RBP=DSP, RBX=UP, RSP=rstack, R12=save slot.
+- Dictionary, vocabularies, `CREATE`/`DOES>`, live REPL, `lib/core.f`, and the Rust harness.
+- `CODE:` and raw code emission as explicit opaque escape hatches.
 
-| Token            | Source                                            |
-|------------------|---------------------------------------------------|
-| `Lit(i64)`       | integer (caught at interp `.got_number`, *before* `literal` runs — the v1 "literal can't reach the compiler" gap, gone by construction) |
-| `FLit(bits)`     | float literal                                     |
-| `Local(off,rw)`  | local read/write                                  |
-| `Word(xt,flags)` | a call to a non-inlined word                      |
-| `Inline(fop)`    | curated primitive with a known emit-template / algebraic identity (`+ - * / and or xor dup drop swap over @ ! < = …`) |
+## Replaced
 
-A folding constant is simply a `Lit` (its value), so the `constant` machinery
-and the `bl`/`true`/`false` ordering hack disappear (§4).
+WF65's compiler emits final bytes as soon as each compiling word runs. WF66 redirects those words to build IR:
 
-**Span-flush rule (intrinsic to Forth, not a design choice).** Immediate words
-and control-flow words run *at compile time* and read `HERE` / the control
-stack; they cannot be inert tokens. A **span** is a maximal run of deferrable
-tokens; every immediate / control-flow / `postpone` / `[` / `;` word **flushes**
-the buffer (optimize → lower → canonical state) and then runs against that
-state. This is the same boundary WF65 already respects — here it is simply where
-the IR buffer empties.
+| Compile-time word | WF66 behavior |
+| --- | --- |
+| `LITERAL` | append an IR literal node |
+| `COMPILE,` / `POSTPONE` | append an IR compile-this node or compile hook call |
+| `IF` / `ELSE` / `THEN` | build CFG branches and control markers |
+| `BEGIN` / `UNTIL` / `AGAIN` / `DO` / `LOOP` | build loop/control-flow IR |
+| `;` | close the definition and run the back end |
 
-## 3. The three passes
+The replay substrate disappears: `LAST_LIT_*`, `LAST_DUP_END`, `LAST_CMP_*`, `LAST_ADDR_*`, `OPT_FENCE`, `try_fold_literal`, and the rewind tails of the old fold words become unnecessary because optimization sees the completed definition IR.
 
-**(a) Front-end / capture.** The lowering hook at the interpreter's convergence
-point appends typed tokens to the per-definition span buffer instead of
-compiling each token immediately.
+## Compile-Time Vocabulary Contract
 
-**(b) Optimizer — pure `tokens → tokens`, no codegen, unit-testable:**
+User immediate words keep working if they are written against the standard compile-time vocabulary. That vocabulary is the IR-builder surface, and compile-time words fall into three classes:
 
-- *const-fold*: evaluate `Lit … Inline(arith)` symbolically (`5 7 +` → `Lit
-  12`). Two-literal stores (`42 var !`) and compile-time `/` fall out because the
-  whole array is visible — the one-slot watermark ceiling is gone.
-- *strength-reduce*: annotate `Inline(*) imm` with the cheap form. (WF65's
-  `fold_times` strength reduction becomes a token annotation, not a rewrite.)
-- *inline*: splice a small `Word`'s token body into the stream (§4), then re-run
-  fold across the former boundary.
-- *schedule*: assign the abstract stack to registers/memory with full-span
-  lookahead (the StackCache's job, done over the whole span at once).
-- *dead-code*: a value pushed then dropped before any settle emits nothing.
+| Class | Examples | Treatment |
+| --- | --- | --- |
+| deferrable | literals, arithmetic, stack shuffles, memory ops with known effects | append tokens to the current IR block |
+| structured control | `IF`/`ELSE`/`THEN`, `BEGIN`/`UNTIL`, `DO`/`LOOP`, `LEAVE`, `EXIT` | build CFG blocks/edges with IR-level marks, not `HERE` addresses |
+| opaque/dynamic | `EXECUTE`, runtime xts, unknown `POSTPONE`, raw `HERE c,` pokes, immediates that escape the vocabulary | settle to canonical state, emit an opaque node with a declared/conservative effect, resume fresh |
 
-**(c) Back-end / lower.** Walk the optimized tokens, emit canonical STC bytes
-(the kernel byte recipes), and force the span to canonical state at its end —
-the WF65 `force_settle` invariant, reused as the lowering postcondition.
+The IR-builder surface includes:
 
-## 4. Inlining = token splicing (the `optinline.fs` payoff)
+- literal construction
+- compile-this / compile-hook construction
+- postpone semantics
+- branch markers and branch resolution
+- control-flow stack operations
+- definition close/finalize
 
-If word *bodies* are kept as token sequences, using a word can splice its tokens
-into the caller before optimizing:
+A user immediate word that calls those words becomes a user-extensible IR macro and is optimized for free. A user immediate word that reads or writes physical code layout directly (`HERE`, `,`, `c,`, raw branch patching) bypasses structured IR unless it goes through a defined builder operation; the safe treatment is an opaque/dynamic boundary.
 
-- `: bl 32 ;` ≡ `[Lit 32]`; `bl +` → `[Lit 32, Inline(+)]` → folds. **Item 2
-  falls out structurally — no `constant` trick, no core.f reordering.**
-- Small colon words inline by splice; const-fold / strength-reduce then run
-  across the call boundary that used to block them.
+## CREATE/DOES>
 
-Heuristic: inline below a token-count threshold or when the body is
-all-deferrable; otherwise emit `Word(xt)` (a call). Recursive / large bodies
-stay calls.
+`CREATE`/`DOES>` uses the same mechanism WF65 already has: defining words install compile behavior on their children through the compile hook. In WF66 that hook builds IR for the child instead of emitting bytes directly. A `CREATE`d child can emit a `Body(addr)` / push-body token; a `DOES>` child emits push-body plus inline-or-call of the does-body. Inlining is allowed only when the target's execution semantics are stable for this compiled definition; mutable, deferred, vectored, or otherwise dynamic behavior stays as a call or opaque boundary.
 
-## 5. The one open decision — where the optimizer runs
+## Optimizer Implementation: Rust-Side
 
-- **Forth-side (recommended).** The kernel provides the token buffer + a fixed
-  repertoire of lowering/emit primitives; the passes are Forth code in a lib
-  file, live-extensible in the REPL. Fits the charter's "grow Forth in Forth"
-  and matches the WF32 precedent (`optliterals32.fs`/`optinline.fs` were Forth).
-  A fixed emit repertoire is **not** a Forth-side assembler, so "no metacompile"
-  holds.
-- **Rust-side.** Type-safe enum IR, cargo unit tests, reuses MCJIT directly —
-  but the language's optimizer lives *outside* the language and is not
-  live-extensible.
+The IR, the optimization passes, the stack-flow → SSA lift, and the register allocator live in **Rust**, not Forth. SSA, liveness, and linear-scan allocation are type-heavy and test-heavy — exactly what Rust's enums + cargo unit tests make safe and fast, and what would be slow and fragile written in Forth. This follows the **LET** precedent: LET is already a Rust-native compile path on the Rasm encoder, and it is easier to build and verify there.
 
-Must be decided before Phase 0.
+The trade is deliberate: the optimizer is **not** live-extensible from the REPL, in exchange for being correct, fast, and unit-testable — which the performance mandate needs. **Forth stays the surface**: the outer interpreter, immediate words, `CREATE`/`DOES>`, and the compile-time vocabulary that drives the IR builder all remain Forth-facing. Optimizer hooks may be exposed to Forth later, but no phase gates on it.
 
-## 6. Phased plan
+## Back End
 
-- **Phase 0** — token buffer + capture hook + const-fold + lower, for `Lit` +
-  arithmetic only; everything else flushes. Proves the three-stage split
-  end-to-end on `: bar 5 * 2 + ;` and `5 7 +` → `12`.
-- **Phase 1** — `dup/drop/swap/over` + the register-window scheduler +
-  strength-reduce annotations.
-- **Phase 2** — `@`/`!` + memory-ordering barrier, decided over the whole span.
-- **Phase 3** — inlining via token-splice; cross-word fold.
-- **Phase 4** — locals, floats.
+At `;`, WF66 runs a per-definition pipeline (light enough for the REPL because the scope is one definition + inlined callees):
 
-## 7. Test strategy — WF65 is the oracle
+1. stack-flow analysis (symbolic stack → SSA values; `swap`/`dup`/`over` become renames)
+2. CFG construction + cleanup; reconcile stacks at joins (phis), check stack-balance
+3. constant folding, strength reduction, algebraic simplification, CSE/DCE
+4. inlining of already-known, stable callees by token-splice, then re-fold across the boundary
+5. **whole-definition register allocation** — data-stack values held in registers *across branches and loops*; the data stack in memory is the spill space and the cross-word ABI (TOS in RAX; reconcile live values at non-inlined calls). This cross-block allocation is the primary speed lever and the thing STC peephole cannot do.
+6. loop-invariant code motion over the CFG (a win the span-flush model could not reach)
+7. MASM/JASM text generation with allocated registers substituted
+8. native Rasm assembly and placement
 
-WF65 is complete and correct, so it is WF66's **differential oracle**: identical
-source must give identical results, and WF66's codegen must be **≥ as optimized**
-(fewer/cheaper instructions, never wrong). Plus:
+This is per-definition and incremental by design. The dictionary is mutable, `DOES>` can patch behavior at runtime, and later definitions can change the world. WF66 optimizes what is closed and known at definition finalization time. Settle-to-canonical is always the fallback: definition exit (`;`), non-inlined calls, and opaque/dynamic regions materialize the data stack to the WF65 ABI before control crosses the boundary.
 
-- pure optimizer unit tests (`tokens → tokens`, no JIT, no session);
-- golden-byte lowering tests (the back-end's recipes);
-- the whole-touched-region differential fuzzer from v2 §8 (compare result **and**
-  the full stack region + `rbp` + scratch memory, byte-for-byte).
+## Opaque Regions
 
-## 8. What WF65 taught us (carried as constraints)
+Raw byte poking, unknown stack effects, dynamic xt execution, and `CODE:` bodies are represented as opaque IR nodes or force opaque compilation for that definition. Before an opaque boundary, live SSA stack values are settled to canonical state (`RAX` for TOS, rest in `[RBP]`); after the boundary, the compiler resumes from the declared stack effect. If no sound effect can be declared, the whole definition falls back to opaque/settled compilation or a clear compile-time error.
 
-- Replay's ceiling is **one-step lookback** (one watermark slot per kind) → the
-  two-literal folds are structurally impossible. The IR removes the ceiling.
-- `OPT_FENCE` was a band-aid for premature emission; deferral + span-flush
-  removes the wound, not just the symptom.
-- `force_settle`'s canonical-state contract is the real correctness crux and
-  survives intact as the back-end's per-span postcondition.
-- Span boundaries (immediate / control-flow) are a property of **Forth**, not of
-  the optimizer — WF65 and WF66 draw them in exactly the same place.
+The contract is binary:
+
+- use the compile-time IR-builder vocabulary: participates in optimization
+- cross an opaque/dynamic boundary: settle first, preserve semantics, block optimization across it
+
+## Non-Goals
+
+WF66 is not a whole-program batch compiler. That would require amputating the user-programmable compile-time semantics that make Forth Forth. WF66 is an optimizing interactive compiler: per-definition, mutable-dictionary aware, and REPL-friendly.
+
+## Test Strategy
+
+- Preserve WF65 behavior with the existing harness and data-driven tests.
+- Add pure IR tests for immediate words and user-defined IR macros.
+- Add backend golden tests for generated JASM/MASM text and native bytes.
+- Add differential definition tests: source in, byte-for-byte equivalent final stack/touched-memory/register state out.
+
+## First Slice
+
+1. Add an IR builder object to the compiling state.
+2. Redirect `LITERAL`, `COMPILE,`, `POSTPONE`, and `;` to the builder/finalizer.
+3. Keep structured control (`IF`/`ELSE`/`THEN`, loops) on the settle-to-canonical compatibility path for Phases 0-3; define the IR-level mark API, but land CFG block/edge construction in Phase 4.
+4. Lower a small closed definition through JASM/Rasm.
+5. Treat `CODE:` and raw byte pokes as opaque.

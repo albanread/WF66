@@ -2,7 +2,7 @@
 
 WF66 is the successor to **WF65** (a complete, working 64-bit STC Forth,
 JIT-compiled via the JASM assembler). It reuses WF65's proven runtime substrate
-— JASM + LLVM-MC/native encoding, the STC kernel primitives, the dictionary, the
+— JASM/Rasm native encoding, the STC kernel primitives, the dictionary, the
 live REPL, and the Rust test harness — and **replaces the compiler**.
 
 ## The change in one line
@@ -26,7 +26,7 @@ identical results, and WF66's codegen must be ≥ as optimized.
 ## Build
 
 ```powershell
-cargo build              # native (LLVM-free) default
+cargo build              # native JASM/Rasm build
 cargo test --test harness
 ```
 

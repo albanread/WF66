@@ -36,7 +36,7 @@
 ; disk for whenever a primitive needs a direct Win32 call; include them
 ; on demand. Dragging the full kernel32.masm in unconditionally cost us
 ; ~1,165 macro expansions + 1,158 LoadLibrary/GetProcAddress/
-; LLVMAddFunction/LLVMAddGlobalMapping per session boot — a multi-second
+; extern binding per session boot — a multi-second
 ; tax for zero gain in the current configuration.
 
 @include "stack.masm"

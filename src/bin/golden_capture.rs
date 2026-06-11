@@ -1,10 +1,9 @@
-//! golden-capture — write the LLVM-MC byte oracle for the Rasm migration.
+//! golden-capture — write the native RasmEncoder kernel byte snapshot.
 //!
 //!   cargo run --bin golden-capture --features opt-metrics
 //!
-//! Builds the kernel through the live LLVM/MCJIT path and records every
-//! assembler-emitted symbol's bytes into `bench/golden/kernel.json`. Run this
-//! BEFORE any LLVM removal — the golden cannot be regenerated afterwards.
+//! Builds the kernel through the live native JASM/Rasm path and records every
+//! assembler-emitted symbol's bytes into `bench/golden/kernel.json`.
 
 use std::path::Path;
 use std::process::ExitCode;

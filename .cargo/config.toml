@@ -1,10 +1,8 @@
 # Tests in this crate share process-global state that cannot tolerate
 # parallel execution:
 #
-#   * The MCJIT engine and its module memory are per-process; each
-#     Wf64Session creates its own Jit, but LLVM's internals (target
-#     init, RTDyld, the global symbol resolver) are not parallel-safe
-#     when multiple engines materialize in the same process.
+#   * Each Wf64Session owns executable memory and loader state; tests should
+#     not materialize multiple sessions concurrently in one process.
 #   * `wfasm::seh` installs ONE Vectored Exception Handler per process
 #     and maintains a single global symbol table for all JITed procs.
 #     Parallel registrations race; symbol resolution under crash dumps

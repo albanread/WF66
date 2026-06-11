@@ -1,16 +1,16 @@
-\ gfx-canvas-mandelbrot-let.f — high-res Mandelbrot, LET (LLVM) math.
+\ gfx-canvas-mandelbrot-let.f - high-res Mandelbrot, LET native math.
 \
 \ Companion to gfx-canvas-mandelbrot.f.  Identical canvas fast path
 \ (fill a BGRA framebuffer, ship ONE canvas-blit), but the per-pixel
 \ iteration arithmetic comes from the LET extension instead of the
 \ hand-written MASM `fractal-iter` primitive.
 \
-\ LET compiles an infix float expression to native SSE via Rust/LLVM
+\ LET compiles an infix float expression to native SSE via JASM/Rasm
 \ at definition time.  `mbrot-step` does ONE  z <- z^2 + c  step and
 \ returns |z'|^2 (escape radius squared) for free, so the Forth outer
 \ loop just counts steps until |z|^2 >= 4.
 \
-\ The instructive A/B: here LLVM compiles the step and a Forth loop
+\ The instructive A/B: here LET compiles the step and a Forth loop
 \ drives it (one LET call per iteration); the MASM version runs the
 \ whole escape loop in registers (one call per pixel).  Same picture,
 \ two codegen paths — compare the speed.
@@ -31,7 +31,7 @@ fvariable cml-cre
 fvariable cml-cim
 variable  cml-row
 
-\ One Mandelbrot iteration, compiled to native SSE by LET/LLVM.
+\ One Mandelbrot iteration, compiled to native SSE by LET.
 \ ( F: z_re z_im c_re c_im -- z_re' z_im' mag )
 \
 \ The whole LET form MUST be on one line: the Demos-menu / REPL eval
@@ -106,7 +106,7 @@ variable  cml-row
 ;
 
 : gfx-canvas-mandelbrot-let
-    cr ." rendering " cml-w . ." x " cml-h . ." Mandelbrot (LET / LLVM) ..." cr
+    cr ." rendering " cml-w . ." x " cml-h . ." Mandelbrot (LET / native) ..." cr
     cml-w cml-h  S" ∴ Mandelbrot HD (LET)"  gpane-open
     dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
     cml-render

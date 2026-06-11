@@ -9,7 +9,6 @@ __pycache__/
 .DS_Store
 desktop.ini
 Thumbs.db
-LLVM-C.dll
 *.out
 !tests/data/**/*.out
 

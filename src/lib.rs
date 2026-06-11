@@ -35,8 +35,6 @@ use std::ptr;
 
 use anyhow::{Context, Result};
 use wfasm::Assembler;
-#[cfg(feature = "llvm")]
-use wfasm::Jit;
 
 pub mod let_lang;
 pub mod gc;
@@ -53,17 +51,9 @@ pub mod opt_metrics;
 #[cfg(feature = "opt-metrics")]
 pub mod opt_timing;
 
-// Golden capture — the LLVM-MC byte oracle for the Rasm migration (Sprint 0).
-// Irreplaceable: captures what LLVM emitted for every kernel symbol before
-// llvm.rs is ever deleted. See docs/design/rasm-replace-llvm.md.
+// Golden capture — byte-exact kernel snapshots for the native RasmEncoder.
 #[cfg(feature = "opt-metrics")]
 pub mod golden;
-
-// LET differential oracle — MCJIT-vs-RasmEncoder byte diff for the LET DSL
-// codegen. Needs both encoders side by side, so it is gated on `llvm` (the
-// transitional dual-stack build). See docs/design/rasm-replace-llvm.md.
-#[cfg(feature = "llvm")]
-pub mod let_oracle;
 
 // Register-pinning (hot-variable scalar replacement) analysis — turns a
 // recorded loop-body op buffer into a pin plan. See docs/design/register_pinning_v1.md.
@@ -1099,7 +1089,7 @@ fn alloc_forth_region(kernel_addr: u64) -> Result<*mut c_void> {
 // region (not the kernel): the region is already within ±1.75 GB of the
 // kernel, and a ±128 MB window keeps the arena within rel32 (±2 GB) of BOTH
 // the kernel and the dict heap, so `call rel32` reaches it either way.
-// RWX so the SimpleMCJITMemoryManager's FinalizeMemory can be a no-op.
+// RWX so runtime CODE:/LET placement can copy native bytes directly.
 fn alloc_jit_arena(anchor: u64) -> Result<*mut c_void> {
     let va2 = get_virtual_alloc2().context("locate VirtualAlloc2")?;
     const GRANULARITY: u64 = 0x10000;
@@ -1229,8 +1219,7 @@ fn alloc_var_region(anchor: u64) -> Result<*mut c_void> {
 type ForthMain = unsafe extern "system" fn(u64, u64, u64, u64) -> u64;
 
 pub struct Wf64Session {
-    /// Boot kernel loader — LLVM MCJIT (`Jit`) or the native `RasmEncoder` +
-    /// `NativeJit`, selected at `with_kernel` time (env `WF64_RASM`). Only the
+    /// Boot kernel loader — native `RasmEncoder` + `NativeJit`. Only the
     /// object-safe `Loader` surface (add_asm/declare_fn/define_extern/lookup_addr)
     /// is used after construction.
     jit: Box<dyn wfasm::Loader>,
@@ -1294,28 +1283,15 @@ pub struct Wf64Session {
     boot_ivars_buckets: Vec<u64>,
 }
 
-// SAFETY: Wf64Session holds raw LLVM pointers via `Jit` that aren't
-// `Send` by default. We rely on this Send impl ONLY to park the session
-// in a `OnceLock<Mutex<…>>` for cross-test sharing — and tests run
-// single-threaded (see .cargo/config.toml RUST_TEST_THREADS=1), so the
-// session is never actually accessed from more than one thread. The
-// Mutex enforces the serial-access discipline; the Send impl makes the
-// type fit through the OnceLock's `Sync` requirement.
+// SAFETY: Wf64Session owns raw executable-memory and Forth arena pointers.
+// We rely on this Send impl ONLY to park the session in a `OnceLock<Mutex<…>>`
+// for cross-test sharing — and tests run single-threaded (see .cargo/config.toml
+// RUST_TEST_THREADS=1), so the session is never actually accessed from more than
+// one thread. The Mutex enforces the serial-access discipline; the Send impl
+// makes the type fit through the OnceLock's `Sync` requirement.
 unsafe impl Send for Wf64Session {}
 
-/// Build the boot-kernel loader. With `llvm` on, `WF64_RASM` selects the native
-/// RasmEncoder + NativeJit over LLVM MCJIT. With `llvm` off, only the native
-/// backend exists (no LLVM linked).
-#[cfg(feature = "llvm")]
-fn build_boot_loader() -> Result<Box<dyn wfasm::Loader>> {
-    if std::env::var_os("WF64_RASM").is_some() {
-        Ok(Box::new(wfasm::native::NativeJit::new()))
-    } else {
-        Ok(Box::new(Jit::new("wf64").context("Jit::new")?))
-    }
-}
-
-#[cfg(not(feature = "llvm"))]
+/// Build the native boot-kernel loader.
 fn build_boot_loader() -> Result<Box<dyn wfasm::Loader>> {
     Ok(Box::new(wfasm::native::NativeJit::new()))
 }
@@ -1361,8 +1337,7 @@ impl Wf64Session {
             eprintln!("=== assembled kernel ===\n{asm_text}========================");
         }
 
-        // JIT setup + declarations. Select the boot backend: the native
-        // RasmEncoder + NativeJit, or LLVM MCJIT (see build_boot_loader).
+        // JIT setup + declarations through the native RasmEncoder + NativeJit.
         let mut jit: Box<dyn wfasm::Loader> = build_boot_loader()?;
         jit.add_asm(&asm_text).context("jit add_asm")?;
         jit.declare_fn("forth_main", 1).context("declare forth_main")?;

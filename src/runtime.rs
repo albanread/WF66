@@ -2508,8 +2508,6 @@ pub extern "C" fn rt_string_bytes_equal(tagged_a: u64, tagged_b: u64) -> u64 {
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wfasm::CodeArena;
-#[cfg(feature = "llvm")]
-use wfasm::Jit;
 
 use crate::let_lang;
 
@@ -2549,15 +2547,6 @@ unsafe fn jit_code_arena(up: u64) -> *mut CodeArena {
     })
 }
 
-#[cfg(feature = "llvm")]
-thread_local! {
-    /// Compiled LET functions live in their own JIT modules.  We keep
-    /// every Jit alive for the duration of the session so the executable
-    /// pages don't get freed under us when a colon definition still
-    /// holds a CALL to the compiled function pointer.
-    static LET_JITS: RefCell<Vec<Jit>> = RefCell::new(Vec::new());
-}
-
 /// Counter for generating unique LET function names. Persists for the
 /// process lifetime; we don't reuse names because old Jits may still hold
 /// the old name (and that's fine, but a fresh counter avoids confusion).
@@ -2565,8 +2554,6 @@ static LET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Drop every LET-compiled Jit. Called by session reset between tests.
 pub fn reset_let_session() {
-    #[cfg(feature = "llvm")]
-    LET_JITS.with(|j| j.borrow_mut().clear());
 }
 
 /// libm functions the LET codegen may reference, with their declared
@@ -2704,8 +2691,7 @@ unsafe fn try_compile_let(up: u64) -> Result<(), String> {
     // — libm is baked as `movabs rax, addr; call rax`, and the constant pool is
     // reached by internal RIP-rel — so there are NO externs and NO relocs to
     // apply. The trampoline below calls `fn_addr` by absolute address, so the
-    // arena location is irrelevant to reachability. Byte-identity to the LLVM-MC
-    // path is gated by the LET differential oracle (tests/let_oracle.rs).
+    // arena location is irrelevant to reachability.
     let place_native = || -> Result<u64, String> {
         let arena = unsafe { jit_code_arena(up) };
         if arena.is_null() {
@@ -2735,28 +2721,7 @@ unsafe fn try_compile_let(up: u64) -> Result<(), String> {
         Ok(dest as u64 + fn_off as u64)
     };
 
-    #[cfg(not(feature = "llvm"))]
     let fn_addr = place_native()?;
-
-    // Under the LLVM build, default to the MCJIT module path; WF64_RASM forces
-    // the native arena path so the two backends can be exercised side by side.
-    #[cfg(feature = "llvm")]
-    let fn_addr = if std::env::var_os("WF64_RASM").is_some() {
-        place_native()?
-    } else {
-        // Compile into a fresh JIT module so the main kernel module stays
-        // frozen and we don't fight MCJIT's whole-module finalization rule.
-        let mut jit = Jit::new(&format!("let_mod_{counter:04}"))
-            .map_err(|e| format!("Jit::new: {e:?}"))?;
-        jit.add_asm(&compiled.asm_text)
-            .map_err(|e| format!("add_asm: {e:?}\nasm was:\n{}", compiled.asm_text))?;
-        jit.declare_fn(&compiled.fn_name, 0)
-            .map_err(|e| format!("declare_fn({}): {e:?}", compiled.fn_name))?;
-        let addr = jit.lookup_addr(&compiled.fn_name)
-            .map_err(|e| format!("lookup_addr({}): {e:?}", compiled.fn_name))?;
-        LET_JITS.with(|j| j.borrow_mut().push(jit));
-        addr
-    };
 
     let here = unsafe { read_u64(up + RT_USER_HERE) };
     let trampoline_len = unsafe {
@@ -2975,16 +2940,6 @@ unsafe fn write_u64_le(dst: *mut u8, val: u64) {
 
 const MACROS_SOURCE: &str = include_str!("../kernel/macros.masm");
 
-#[cfg(feature = "llvm")]
-thread_local! {
-    /// Each LLVM-compiled CODE: word lives in its own JIT module.  We keep
-    /// the Jit alive for the session lifetime so its executable memory
-    /// stays mapped while colon definitions still reference the
-    /// function via the trampoline. (The native path places words directly
-    /// in the rel32-near arena and needs no such cache.)
-    static CODE_JITS: RefCell<Vec<Jit>> = RefCell::new(Vec::new());
-}
-
 thread_local! {
     /// Shared JASM Assembler pre-loaded with `macros.masm`. Stored as
     /// `Option` so we lazily initialise on first use — at that point the
@@ -2995,8 +2950,6 @@ thread_local! {
 static CODE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub fn reset_code_session() {
-    #[cfg(feature = "llvm")]
-    CODE_JITS.with(|j| j.borrow_mut().clear());
     // CODE_ASSEMBLER intentionally kept — re-bootstrapping macros.masm
     // for every reset would be wasteful, and its expansion-time state
     // (defines, assigns, macros) doesn't accumulate per call.
@@ -3120,25 +3073,7 @@ unsafe fn try_compile_code(up: u64) -> Result<u64, String> {
         Ok(dest as u64 + fn_off as u64)
     };
 
-    #[cfg(not(feature = "llvm"))]
     let fn_addr = place_native()?;
-
-    #[cfg(feature = "llvm")]
-    let fn_addr = if std::env::var_os("WF64_RASM").is_some() {
-        place_native()?
-    } else {
-        let mut jit = Jit::new_in_arena(&format!("code_mod_{counter:04}"), arena)
-            .map_err(|e| format!("Jit::new_in_arena: {e:?}"))?;
-        jit.add_asm(&mc_text)
-            .map_err(|e| format!("add_asm: {e:?}\nasm was:\n{mc_text}"))?;
-        jit.declare_fn(&fn_label, 0)
-            .map_err(|e| format!("declare_fn({fn_label}): {e:?}"))?;
-        let addr = jit
-            .lookup_addr(&fn_label)
-            .map_err(|e| format!("lookup_addr({fn_label}): {e:?}"))?;
-        drop(jit); // code persists in the arena; engine no longer needed
-        addr
-    };
 
     // Advance TO_IN past the consumed portion of the current line.
     unsafe {

@@ -1,5 +1,5 @@
 //! rasm-diff — assemble the real kernel with the native RasmEncoder and diff
-//! every symbol's bytes against the committed LLVM golden.
+//! every symbol's bytes against the committed golden.
 //!
 //!   cargo run --bin rasm-diff --features opt-metrics
 //!

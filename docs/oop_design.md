@@ -664,4 +664,4 @@ Early binding (named object / `super -> sel`) and raw `(send)` are unchanged.
 Both optimizations are gated by the `oop_*` eval oracle plus
 `eval_pic_polymorphic_dispatch` / `eval_pic_sees_method_redefinition` /
 `eval_value_ivar_addr_of_and_legacy`, and the kernel golden confirms the new
-emitters are byte-identical under RasmEncoder and LLVM-MC.
+emitters are byte-identical under the RasmEncoder.

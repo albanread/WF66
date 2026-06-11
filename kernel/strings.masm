@@ -3,7 +3,7 @@
 ;
 ; All ports start from `cargo run --bin port-wf32`. Manual fixes:
 ;   - `rep movs byte` / `rep stos byte` (WF32 MASM-style operand
-;     spelling) → `rep movsb` / `rep stosb` (LLVM-MC mnemonic spelling).
+;     spelling) -> `rep movsb` / `rep stosb` (JASM/Rasm mnemonic spelling).
 ;   - WF32 RPN immediates (`cell msbit`, `cell 1-`) that the porter
 ;     does not evaluate — substituted with concrete WF64 values
 ;     (`3` for log2(cell); `cell - 1` for the alignment mask).
@@ -148,7 +148,7 @@ endp()
 ; ─── String primitives (gkernel32.fs:914-963, 1278) ───────────────────
 
 ; fill  ( c-addr u byte -- )    write `byte` into `u` consecutive bytes
-;     WF32: `rep stos byte`. LLVM-MC wants `rep stosb` as one token.
+;     WF32: `rep stos byte`. JASM/Rasm wants `rep stosb` as one token.
 ;     Win64 caller doesn't expect rdi to be preserved; we use it freely.
 proc(fill)
     mov     rcx, [rbp]              ; rcx = u (count)

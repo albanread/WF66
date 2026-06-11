@@ -6,22 +6,7 @@ description = "A 64-bit STC Forth, JIT-compiled via the JASM assembler"
 build = "build.rs"
 
 [features]
-# NATIVE IS THE DEFAULT. A plain `cargo build`/`cargo test` produces the
-# LLVM-free build: WF65 boots and runs entirely on the native RasmEncoder +
-# NativeJit, and both CODE: and LET assemble into the code arena (byte-identical
-# to the old LLVM-MC path). We ship BOTH binaries every release — native is the
-# standard, `--features llvm` builds the second (LLVM) one.
 default = []
-# `llvm` (opt-in) links LLVM-C (via wfasm/llvm) for the MCJIT boot backend and,
-# more importantly now, the differential ORACLES that keep RasmEncoder honest:
-# the LET oracle (tests/let_oracle.rs) and the kernel golden's live-build check.
-# Build/test it explicitly: `cargo test --features llvm`. See
-# docs/design/rasm-replace-llvm.md.
-llvm = ["wfasm/llvm"]
-# Builds wf64-ui as a Windows GUI subsystem app (no console window
-# pops up when launched from Explorer).  Release packaging always
-# enables this; dev builds leave it off so eprintln traces remain
-# visible in the cargo-run terminal.
 gui_subsystem = []
 # Optimizer measurement harness (bench/ corpus, static metric gate,
 # opt-bench tool).  Pulls in a pure-Rust x86 decoder + hasher used ONLY
@@ -128,11 +113,6 @@ required-features = ["opt-metrics"]
 name = "rasm-diff"
 path = "src/bin/rasm_diff.rs"
 required-features = ["opt-metrics"]
-
-[[bin]]
-name = "let-diff"
-path = "src/bin/let_diff.rs"
-required-features = ["llvm"]
 
 [[bin]]
 name = "newfactor-ui"

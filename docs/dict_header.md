@@ -176,7 +176,7 @@ That means `>body` now has the right behavior shape for both supported and unsup
 
 ## Note
 
-The WF64-specific part is only how primitive xt-side cells are populated after MCJIT finalization. The observable dictionary shape is that xts are self-describing again.
+The WF64-specific part is only how primitive xt-side cells are populated after native loader finalization. The observable dictionary shape is that xts are self-describing again.
 
 ## Relevant files
 

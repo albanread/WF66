@@ -276,7 +276,7 @@ fn translate_line(line: &str) -> String {
         Some(i) => line[..i].trim_end(),
         None => line,
     };
-    // WF32 Forth-asm uses `$N` for hex immediates; JASM/LLVM-MC expects
+    // WF32 Forth-asm uses `$N` for hex immediates; JASM/Rasm expects
     // `0xN`. Rewrite `$<hexdigits>` → `0x<hexdigits>` as a global
     // preprocess so the rest of the pipeline sees clean numbers.
     let body_str = rewrite_dollar_hex(body_no_comment);
@@ -309,7 +309,7 @@ fn translate_line(line: &str) -> String {
     }
 
     // `rep [movs|stos|lods|scas|cmps] byte/word/dword/qword`
-    // → `rep <op><sfx>`. LLVM-MC wants the single-token form. The
+    // -> `rep <op><sfx>`. JASM/Rasm wants the single-token form. The
     // `dword` size in WF32 source means "the cell" (32-bit cells
     // there), so on WF64 it rewrites to `q` (8-byte cell).
     if matches!(toks[0].as_str(), "rep" | "repnz" | "repz" | "repe" | "repne")
@@ -330,7 +330,7 @@ fn translate_line(line: &str) -> String {
 
     let mnemonic = translate_mnemonic(&toks[0]);
     let raw_operands = group_operands(&toks[1..]);
-    // For jumps, drop the `short` keyword if present — LLVM-MC picks
+    // For jumps, drop the `short` keyword if present; Rasm picks
     // the optimal encoding without that hint and would otherwise see
     // `short` as a label name.
     let mut operands: Vec<Vec<String>> = raw_operands

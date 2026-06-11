@@ -1,7 +1,7 @@
 //! Golden oracle stability test (Rasm migration, Sprint 0).
 //!
-//! Re-captures the kernel byte golden from the live LLVM/MCJIT build and
-//! asserts it matches the committed `bench/golden/kernel.json`. Because LLVM-MC
+//! Re-captures the kernel byte golden from the live build and
+//! asserts it matches the committed `bench/golden/kernel.json`. Because it
 //! is deterministic and the capture is ASLR-normalized, this is byte-stable for
 //! a given kernel source — so a failure means EITHER the kernel changed (then
 //! re-run `cargo run --bin golden-capture --features opt-metrics` and review the
@@ -19,10 +19,8 @@ fn golden_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("bench").join("golden").join("kernel.json")
 }
 
-/// The live kernel build (NATIVE by default; LLVM under `--features llvm`)
-/// must match the committed golden byte-for-byte. With native the default, this
-/// proves the native loader places exactly what LLVM-MC would have — i.e. the
-/// golden is now an LLVM *oracle* the native build is held to, not its source.
+/// The live kernel build must match the committed golden byte-for-byte.
+/// This proves the native loader places exactly what the RasmEncoder emits.
 #[test]
 fn golden_matches_live_build() {
     let committed: BTreeMap<String, SymbolGolden> = serde_json::from_str(
@@ -60,15 +58,15 @@ fn golden_matches_live_build() {
 }
 
 /// The native RasmEncoder assembles the whole kernel byte-identically to
-/// LLVM-MC (every symbol matches the golden). Locks in the Sprint-1 milestone —
-/// a regression here means the from-scratch encoder drifted from MC.
+/// the committed golden. Locks in the Sprint-1 milestone —
+/// a regression here means the from-scratch encoder drifted.
 #[test]
-fn rasm_encoder_byte_identical_to_llvm() {
+fn rasm_encoder_byte_identical() {
     let kernel = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel").join("main.masm");
     let divergences = golden::rasm_divergent_symbols(&kernel).expect("assemble + diff kernel");
     assert!(
         divergences.is_empty(),
-        "RasmEncoder diverged from the LLVM golden on {} symbol(s):\n{}",
+        "RasmEncoder diverged from the golden on {} symbol(s):\n{}",
         divergences.len(),
         divergences.iter().take(30).cloned().collect::<Vec<_>>().join("\n"),
     );

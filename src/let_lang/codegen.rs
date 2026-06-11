@@ -51,9 +51,8 @@ const SCRATCH_COUNT: u8 = 6;
 enum FnKind {
     /// One-instruction SSE intrinsic that doesn't need a libm call.
     Intrinsic(IntrinsicKind),
-    /// Resolved via dynamic linking — MCJIT looks the symbol up at
-    /// finalize time through the runtime memory manager (which on
-    /// Windows finds ucrtbase.dll's exports automatically).
+    /// Resolved by the WF64 runtime and baked into the emitted code as an
+    /// absolute call target.
     Libm { arity: usize, symbol: &'static str },
     /// `select(cond, then, else)` — branchless conditional via cmpsd +
     /// andpd/andnpd/orpd blend.  Special-cased because it's 3-arg and
@@ -222,8 +221,7 @@ pub fn lower(form: &LetForm, fn_name: &str, libm_table: &LibmTable) -> Result<St
     s.push_str("    ret\n");
 
     // Constant pool (rodata-style, but the assembler emits it into .text
-    // alongside the code — which is fine for MCJIT, the bytes are
-    // executable-AND-readable in our scheme).
+    // alongside the code, which is executable-AND-readable in our scheme).
     if !const_pool.is_empty() {
         s.push_str("    .p2align 3\n");
         for (i, bits) in const_pool.iter().enumerate() {
@@ -495,9 +493,7 @@ fn emit_intrinsic(
     Ok(())
 }
 
-/// Emit a libm call as `mov rax, <abs_addr>; call rax`. Baking the
-/// absolute address in avoids depending on MCJIT's symbol resolver,
-/// which doesn't auto-find ucrtbase.dll exports on Windows.
+/// Emit a libm call as `mov rax, <abs_addr>; call rax`.
 fn emit_libm_call(
     symbol: &str,
     addr: u64,

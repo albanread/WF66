@@ -23,7 +23,7 @@ Use `LET` when:
 - You're writing a numerical function (geometry, physics, signal
   processing, shaders, statistics).
 - The body is naturally an expression, not a sequence of stack moves.
-- You want LLVM's view of register allocation, common-subexpression
+- You want the optimizer's view of register allocation, common-subexpression
   elimination, and FMA fusion instead of pop-pop-push at every step.
 
 Use `CODE:` when:
@@ -402,7 +402,7 @@ CODE: throws -2057. There are two paths:
 - **MC parse errors** (your asm is invalid) also throw, but the MC
   error message has the lexical detail — usually a `<inline asm>:N:M:
   unexpected token` style message on the line above the THROW. That
-  comes from LLVM-MC's diagnostic handler — see the "graceful MC
+  comes from the assembler's diagnostic handler — see the "graceful MC
   errors" commit if you're curious.
 
 ### Live REPL caveat
@@ -444,7 +444,7 @@ LET:
   the gradient pass.
 
 CODE:
-- LLVM-MC errors are caught but not super-readable. If you'd rather
+- Assembler errors are caught but not super-readable. If you'd rather
   see a clean parse error, use a kernel `.masm` file and rebuild.
 - The 12-byte trampoline means each call goes `CALL trampoline; JMP
   fn` rather than `CALL fn` directly. ~3-5 cycles per call site.

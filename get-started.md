@@ -31,7 +31,7 @@ There are legacy tools and reference materials in the tree, but contributor-faci
 
 WF64 produces a single Rust binary (`cargo run`) that:
 
-1. Loads the assembled kernel into MCJIT at process start.
+1. Loads the assembled kernel through the native JASM/Rasm loader at process start.
 2. `VirtualAlloc2`s a 128 MB region within ±2 GB of the kernel (so all `call rel32`s fit) and carves it into data stack / return stack / user area / dictionary heap.
 3. Bootstraps the dictionary by calling JITed `(create)` / `(set-xt)` / `(set-comp)` / `(set-flags)` once per primitive.
 4. Drops into the REPL (`quit`) — `>` prompt, line-buffered stdin, and startup source loading.
@@ -164,7 +164,7 @@ When you encounter an oddity or bug, fix it in WF64 and document the local reaso
 
 | Link | What |
 |---|---|
-| [`E:\JASM\rust\`](file:///E:/JASM/rust/) | JASM macro assembler + MCJIT wrapper |
+| [`E:\JASM\rust\`](file:///E:/JASM/rust/) | JASM macro assembler + native Rasm loader |
 | [`E:\JASM\rust\USER-GUIDE.md`](file:///E:/JASM/rust/USER-GUIDE.md) | JASM language reference (directives, macros, scope rules) |
 | [`E:\JASM\rust\README.md`](file:///E:/JASM/rust/README.md) | JASM architecture overview |
 | [`.claude/skills/jasm-forth/SKILL.md`](.claude/skills/jasm-forth/SKILL.md) | Day-to-day mechanics (auto-loads in-project) |
@@ -186,7 +186,7 @@ cargo run --bin port-wf32 -- '+'             # optional legacy translator helper
 
 **Knobs:**
 
-- `WF64_DUMP_ASM=1 cargo test --test harness` — dump the post-expansion asm JASM hands to LLVM-MC. Use when a macro isn't expanding the way you expect.
+- `WF64_DUMP_ASM=1 cargo test --test harness` — dump the post-expansion asm JASM hands to Rasm. Use when a macro isn't expanding the way you expect.
 - `WF64_BOOT_INFO=1 cargo run` — print region base / HERE / LATEST on boot.
 - `WF32_KERNEL=<path>` — override the legacy translator input path.
 

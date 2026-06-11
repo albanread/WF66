@@ -8,7 +8,7 @@ description: Use this skill whenever working in the WF64 codebase — writing or
 You are working on **WF64**, a 64-bit STC Forth for Windows x64 built with JASM and a Rust test harness. We are:
 
 - **Writing Forth in assembly.** Each Forth primitive is a `proc(name) … endp()` block in a `.masm` file under `E:\WF64\kernel\`.
-- **Using our own macro assembler.** JASM (at `E:\JASM\rust\`) parses the `.masm` source, expands macros, hands MC-flavour Intel-syntax asm to LLVM-MC for encoding, and exposes the result as a callable function pointer via MCJIT.
+- **Using our own macro assembler.** JASM (at `E:\JASM\rust\`) parses the `.masm` source, expands macros, hands MC-flavour Intel-syntax asm to the native Rasm encoder, and exposes the result through the native loader.
 - **Testing in Rust.** `E:\WF64\tests\harness.rs` calls primitives directly (`session.push(v); session.call("name"); session.stack()`) and feeds full REPL pipelines through `session.eval(text)` and asserts on captured stdout.
 - **Growing Forth live.** `cargo run --bin wf64` starts a live REPL that auto-loads `lib/core.f`; define words interactively, test them in the running image, use `forget_last` to roll back failed experiments, and only then persist successful words into `lib/core.f`.
 - **Cheating on bootstrap, not on language.** No metacompile, no PE-image emission, no Forth-side assembler. The priority is a coherent, usable Forth implemented directly in this tree.
@@ -258,7 +258,7 @@ The Rust runtime functions are declared in `kernel/runtime_decls.masm` (`@extern
 ## What NOT to do
 
 - **Don't invent unnecessary substrate.** If you need a helper, prefer a colon definition or a Rust runtime fn before adding a new `proc`.
-- **Don't hand-roll x86 encoding.** LLVM MC encodes every instruction. We write text.
+- **Use the native Rasm encoder.** Kernel primitives stay as MASM/JASM text; encoding is owned by our assembler pipeline.
 - **Don't reach for `unsafe` blocks in the Rust harness to "fix" stack issues** — the bug is almost always in the .masm. Read the rstack-juggle section first.
 - **Don't skip the test.** Every primitive ported needs a direct test in `tests/harness.rs`. The harness is fast (~0.2s for 40+ tests) — there's no excuse.
 
