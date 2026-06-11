@@ -566,6 +566,32 @@ fn wf66_binary_compares_match_eager_oracle() {
 }
 
 #[test]
+fn wf66_idioms_match_eager_oracle() {
+    // Common multi-op idioms Forth programmers write, recognized and replaced.
+    let cases = [
+        (": w swap drop ;", "3 7 w ."),         // -> nip -> 3
+        (": w over over ;", "3 7 w . . . ."),   // -> 2dup -> 3 7 3 7
+        (": w swap swap ;", "3 7 w . ."),       // -> identity -> 7 3
+        (": w 0 = if 11 else 22 then ;", "0 w .\n5 w ."), // 0= fused
+        (": w 0 < if 1 else 0 then ;", "-3 w .\n4 w ."),
+        (": w 0 > if 1 else 0 then ;", "5 w .\n-5 w ."),
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
 fn wf66_control_flow_actually_rewrites() {
     // Confirm a control-flow definition genuinely goes through WF66 (the body
     // contains a Jcc/jmp from our lowering and differs from the eager body).

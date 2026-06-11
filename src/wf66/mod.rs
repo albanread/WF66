@@ -303,6 +303,19 @@ impl CmpOp {
         }
     }
 
+    /// The unary `0xx` equivalent of a binary comparison against a literal 0
+    /// (`a 0 = ` -> `a 0=`), if one exists.
+    fn zero_form(self) -> Option<CmpOp> {
+        use CmpOp as C;
+        match self {
+            C::Eq => Some(C::ZeroEq),
+            C::Ne => Some(C::ZeroNe),
+            C::Lt => Some(C::ZeroLt),
+            C::Gt => Some(C::ZeroGt),
+            _ => None,
+        }
+    }
+
     /// Materialize the -1/0 flag in `rax` (the non-fused case).
     fn emit(self, out: &mut String) {
         if matches!(self, CmpOp::ZeroLt) {
@@ -819,13 +832,19 @@ fn combine_imm(op: Fop, a: i64, b: i64) -> Option<i64> {
 /// IR node that lowers to optimal inline code (no call). Returns the replacement
 /// (0, 1, or 2 tokens) or `None` if no rule applies.
 fn reduce_pair(a: Token, b: Token) -> Option<Vec<Token>> {
-    use StackOp::{Drop, Dup, Over};
+    use StackOp::{Drop, Dup, Over, Swap};
     use Token::{Cmp, DupOp, ImmOp, Inline, Lit, Stack};
     Some(match (a, b) {
         // DCE: a side-effect-free producer then drop -> nothing
         (Lit(_) | Stack(Dup) | Stack(Over), Stack(Drop)) => vec![],
         // two drops collapse to one 2drop (frequent: `drop drop`, miner-ranked)
         (Stack(Drop), Stack(Drop)) => vec![Stack(StackOp::TwoDrop)],
+        // common idiom -> rarer single-op equivalent (Forth favors common ops)
+        (Stack(Swap), Stack(Drop)) => vec![Stack(StackOp::Nip)], // swap drop = nip
+        (Stack(Over), Stack(Over)) => vec![Stack(StackOp::TwoDup)], // over over = 2dup
+        (Stack(Swap), Stack(Swap)) => vec![],                    // swap swap = identity
+        // literal-zero comparison -> unary zero form (then fuses with if/until)
+        (Lit(0), Cmp(c)) if c.zero_form().is_some() => vec![Cmp(c.zero_form().unwrap())],
         // literal folded into an op -> register-immediate op
         (Lit(k), Inline(op)) if fits_i32(k) => vec![ImmOp { op, k }],
         // dup + binary op -> self-combining op (a+a, a*a, ...)
@@ -1118,6 +1137,43 @@ mod tests {
             ir.push(Token::Inline(Fop::Add));
         }
         assert_eq!(reduce(&ir), vec![Token::ImmOp { op: Fop::Add, k: 4 }]);
+    }
+
+    #[test]
+    fn reduce_idioms_to_single_ops() {
+        // common idioms collapse to their rarer single-op equivalents
+        assert_eq!(
+            reduce(&[Token::Stack(StackOp::Swap), Token::Stack(StackOp::Drop)]),
+            vec![Token::Stack(StackOp::Nip)]
+        );
+        assert_eq!(
+            reduce(&[Token::Stack(StackOp::Over), Token::Stack(StackOp::Over)]),
+            vec![Token::Stack(StackOp::TwoDup)]
+        );
+        assert_eq!(
+            reduce(&[Token::Stack(StackOp::Swap), Token::Stack(StackOp::Swap)]),
+            vec![]
+        );
+        // 0 = -> 0=
+        assert_eq!(
+            reduce(&[Token::Lit(0), Token::Cmp(CmpOp::Eq)]),
+            vec![Token::Cmp(CmpOp::ZeroEq)]
+        );
+        // 0 < if  cascades: zero-form then compare->branch fusion
+        assert_eq!(
+            reduce(&[
+                Token::Lit(0),
+                Token::Cmp(CmpOp::Lt),
+                Token::Ctl(Ctl::If),
+                Token::Lit(1),
+                Token::Ctl(Ctl::Then),
+            ]),
+            vec![
+                Token::CmpCtl(CmpOp::ZeroLt, Ctl::If),
+                Token::Lit(1),
+                Token::Ctl(Ctl::Then),
+            ]
+        );
     }
 
     #[test]
