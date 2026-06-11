@@ -106,6 +106,68 @@ fn eval_arithmetic() {
     assert_eq!(out, "8  ok\n14  ok\n");
 }
 
+// ── WF66 token-IR compiler (roadmap Phase 0) ─────────────────────────
+// Opt-in: set_wf66_enabled(true) makes `:` shadow-capture the body and `;`
+// rewrite it through the WF66 optimizer when the span is deferrable (literals +
+// known arithmetic). The eager compiler is the differential oracle.
+
+#[test]
+fn wf66_folds_constant_definition() {
+    // : twelve 5 7 + ;  -> const-fold to Lit 12 -> push 12; ret.
+    let mut s = sess();
+    s.set_wf66_enabled(true);
+    let out = s.eval(": twelve 5 7 + ;\ntwelve .\nbye\n").unwrap();
+    assert_eq!(out, " ok\n12  ok\n");
+}
+
+#[test]
+fn wf66_lowers_runtime_arithmetic() {
+    // : bar 5 * 2 + ;  ( n -- n*5+2 ) — lowers (operand is runtime), no fold.
+    let mut s = sess();
+    s.set_wf66_enabled(true);
+    let out = s.eval(": bar 5 * 2 + ;\n3 bar .\nbye\n").unwrap();
+    assert_eq!(out, " ok\n17  ok\n");
+}
+
+#[test]
+fn wf66_matches_eager_oracle() {
+    // Differential oracle: identical source -> identical observable output,
+    // whether compiled eagerly or through WF66.
+    let src = ": bar 5 * 2 + ;\n3 bar .\n10 bar .\n-4 bar .\nbye\n";
+    let eager = {
+        let mut s = sess();
+        s.eval(src).unwrap()
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(src).unwrap()
+    };
+    assert_eq!(eager, wf66);
+}
+
+#[test]
+fn wf66_non_deferrable_falls_back_to_eager() {
+    // `dup` is not a known Fop -> taints the span -> the eager body stands.
+    // Must still produce the right answer.
+    let mut s = sess();
+    s.set_wf66_enabled(true);
+    let out = s.eval(": sq dup * ;\n6 sq .\nbye\n").unwrap();
+    assert_eq!(out, " ok\n36  ok\n");
+}
+
+#[test]
+fn wf66_does_not_disturb_subsequent_eager_defs() {
+    // After a WF66 rewrite, a following (non-deferrable) definition still
+    // compiles and runs correctly — capture state was cleared at `;`.
+    let mut s = sess();
+    s.set_wf66_enabled(true);
+    let out = s
+        .eval(": twelve 5 7 + ;\n: inc 1 + ;\ntwelve inc .\nbye\n")
+        .unwrap();
+    assert_eq!(out, " ok\n ok\n13  ok\n");
+}
+
 #[test]
 fn eval_brk_and_int3_are_callable() {
     let mut s = sess();

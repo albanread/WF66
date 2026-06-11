@@ -2937,6 +2937,16 @@ proc(colon)
     mov     qword ptr [UP + user_LAST_DUP_END], 0
     mov     qword ptr [UP + user_LAST_CMP_END], 0
     mov     qword ptr [UP + user_LAST_ADDR_END], 0
+    ; WF66 token-IR capture: if enabled, begin shadow-recording this definition.
+    ; The eager compiler still runs; `;` rewrites the body iff it was deferrable.
+    cmp     qword ptr [UP + user_WF66_ENABLE], 0
+    je      .no_wf66_begin
+    mov     qword ptr [UP + user_WF66_REC], 1
+    push    rax
+    mov     rcx, UP
+    win64_call(rt_ir_begin)
+    pop     rax
+.no_wf66_begin:
     next()
 endp()
 
@@ -2973,6 +2983,24 @@ proc(semicolon)
     next()
 
 .in_compile:
+    ; WF66 token-IR finalize: if we were capturing, let the finalizer try to
+    ; rewrite the body. Returns 1 (it rewrote the body, including the ret) or 0
+    ; (non-deferrable -> keep the eagerly-compiled body and finish normally).
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .normal_finish
+    push    rax
+    mov     rcx, UP
+    win64_call(rt_ir_finalize)
+    mov     r11, rax
+    pop     rax
+    test    r11, r11
+    jz      .normal_finish
+    ; Body already complete (push…/ret) at HERE; just leave compile state.
+    mov     qword ptr [UP + user_STATE], 0
+    mov     qword ptr [UP + user_LOCALS_COUNT], 0
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    next()
+.normal_finish:
     call    emit_locals_release
     mov     r8, [UP + user_HERE]
     ; Tail-call optimisation: if the most recent CALL is immediately

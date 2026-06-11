@@ -134,6 +134,9 @@
                                      ; here/, /allot/create bodies live here, NOT
                                      ; in the executable code region (W^X)
 @assign user_VAR_LIMIT     = 0x1828  ; end of the data region
+; ── WF66 token-IR capture (docs/design/wf66_charter.md) ────────────────
+@assign user_WF66_ENABLE   = 0x19C0  ; 1 -> shadow-capture new colon defs as token IR
+@assign user_WF66_REC      = 0x19C8  ; 1 -> currently capturing a definition
 ; ── Register-pinning (hot-variable) compile-time op buffer ─────────────
 ; Phase 0 substrate: a do...loop body is recorded as (action,payload)
 ; records between `do` and the matching `loop`, then replayed through the

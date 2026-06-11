@@ -31,6 +31,11 @@
 @extern rt_pin_emit_prologue(1) ; (UP) emit prologue loads at HERE, return #bytes
 @extern rt_pin_emit_writeback(1); (UP) emit write-backs at HERE
 @extern rt_pin_emit_access(2)   ; (UP, kind<<8|reg) emit one pinned access at HERE
+@extern rt_ir_begin(1)          ; (UP) WF66: start token-IR capture for a definition
+@extern rt_ir_lit(2)            ; (UP, value) WF66: append a literal push
+@extern rt_ir_word(2)           ; (UP, xt) WF66: append a compiled word (Fop or taint)
+@extern rt_ir_taint(1)          ; (UP) WF66: mark span non-deferrable (immediate ran)
+@extern rt_ir_finalize(1)       ; (UP) WF66: finalize; 1 if it rewrote the body, else 0
 @extern rt_slurp_file(2)        ; read file at (addr,len) into Rust Vec, return content ptr or 0
 @extern rt_slurp_len(0)         ; return byte length of top slurped file
 @extern rt_slurp_pop(0)         ; pop and free the top slurped file

@@ -144,6 +144,22 @@ proc(interpret_source)
     jz      .compile_exec_empty
 
 .compile_ct:
+    ; WF66 token-IR capture: record the compiled word (a known arithmetic
+    ; primitive becomes Inline(fop); anything else taints the span). The eager
+    ; compile below still runs. rcx may be a normal ct or `execute` (a non-empty
+    ; immediate); recording its xt either inlines or taints, both correct.
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .compile_ct_eager
+    push    rax
+    push    rcx
+    push    rdx
+    mov     rcx, UP
+    mov     rdx, [rsp]                      ; arg2 = xt (saved on top of stack)
+    win64_call(rt_ir_word)
+    pop     rdx
+    pop     rcx
+    pop     rax
+.compile_ct_eager:
     mov     [DSP - cell], TOS
     mov     TOS, rdx
     sub     DSP, cell
@@ -158,6 +174,17 @@ proc(interpret_source)
     ja      .compile_exec_ready
     add     DSP, cell                       ; normalize to internal empty-stack form
 .compile_exec_ready:
+    ; WF66: an immediate word is about to run during capture; its emission is
+    ; opaque to the IR, so taint the span (forces the eager body to stand).
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .cer_eager
+    push    rcx
+    push    rdx
+    mov     rcx, UP
+    win64_call(rt_ir_taint)
+    pop     rdx
+    pop     rcx
+.cer_eager:
     mov     TOS, rdx
     call    rcx
     jmp     .after_word
@@ -242,6 +269,15 @@ proc(interpret_source)
     jz      .tokens
     cmp     qword ptr [UP + user_PIN_RECORDING], 0
     jne     .pin_record_lit
+    ; WF66 token-IR capture: append a literal push; the eager `literal` runs too.
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .got_number_eager
+    push    rax                             ; save the number (TOS)
+    mov     rcx, UP
+    mov     rdx, rax                        ; arg2 = value
+    win64_call(rt_ir_lit)
+    pop     rax
+.got_number_eager:
     call    literal
     jmp     .tokens
 
@@ -276,6 +312,15 @@ proc(interpret_source)
     call    fliteral
     jmp     .tokens
 .do_fliteral:
+    ; WF66: Phase 0 IR does not model float literals; taint the span so the
+    ; eager body is kept.
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .do_fliteral_eager
+    push    rax
+    mov     rcx, UP
+    win64_call(rt_ir_taint)
+    pop     rax
+.do_fliteral_eager:
     call    fliteral
     jmp     .tokens
 

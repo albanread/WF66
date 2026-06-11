@@ -2046,6 +2046,14 @@ impl Wf64Session {
     /// LATEST — head of dictionary chain.
     pub fn latest(&self) -> u64 { self.user_u64(USER_LATEST_VAR) }
 
+    /// Enable or disable WF66 token-IR capture for subsequent colon definitions
+    /// (roadmap Phase 0). Off by default and cleared on `reset()`. When on, `:`
+    /// shadow-captures the body and `;` rewrites it through the WF66 optimizer
+    /// when the whole span is deferrable (literals + known arithmetic).
+    pub fn set_wf66_enabled(&mut self, on: bool) {
+        self.write_user_u64(USER_WF66_ENABLE, if on { 1 } else { 0 });
+    }
+
     /// Returns the current data stack, top first. `stack()[0]` is TOS.
     pub fn stack(&self) -> Vec<i64> {
         let depth = ((self.dsp_top - self.current_dsp) / 8) as usize;
