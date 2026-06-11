@@ -957,12 +957,44 @@ pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, Low
 enum Instr {
     /// `add rbp, n` (n>=0) or `sub rbp, -n` (n<0): the DSP adjust.
     AdjustDsp(i64),
+    /// `mov <dst>, [rbp+disp]`: load a data-stack cell into a register.
+    LoadCell { dst: String, disp: i64 },
+    /// `mov [rbp+disp], <src>`: spill a register to a data-stack cell.
+    StoreCell { disp: i64, src: String },
     /// Any other emitted line, verbatim (without its trailing newline).
     Raw(String),
 }
 
-/// Lex lowered asm text into instruction records. Only the rbp adjust is
-/// recognized; everything else (including labels and the preamble) is `Raw`.
+/// Format an `[rbp+disp]` operand exactly as the emitters do.
+fn mem_rbp(disp: i64) -> String {
+    if disp == 0 {
+        "[rbp]".to_string()
+    } else if disp > 0 {
+        format!("[rbp + {disp}]")
+    } else {
+        format!("[rbp - {}]", -disp)
+    }
+}
+
+/// Parse an `[rbp]` / `[rbp + N]` / `[rbp - N]` operand to its displacement.
+/// Returns None for any other memory operand (e.g. `[rax]`, indexed) so those
+/// stay `Raw`.
+fn parse_rbp_mem(s: &str) -> Option<i64> {
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner == "rbp" {
+        Some(0)
+    } else if let Some(r) = inner.strip_prefix("rbp + ") {
+        r.trim().parse::<i64>().ok()
+    } else if let Some(r) = inner.strip_prefix("rbp - ") {
+        r.trim().parse::<i64>().ok().map(|v| -v)
+    } else {
+        None
+    }
+}
+
+/// Lex lowered asm text into instruction records. The rbp adjust and
+/// `[rbp+disp]` cell loads/stores are recognized; everything else (program
+/// memory `[rax]`, labels, the preamble, lea, arithmetic-to-memory) is `Raw`.
 fn parse_instrs(asm: &str) -> Vec<Instr> {
     asm.lines()
         .map(|line| {
@@ -975,6 +1007,24 @@ fn parse_instrs(asm: &str) -> Vec<Instr> {
             if let Some(rest) = t.strip_prefix("sub rbp, ") {
                 if let Ok(v) = rest.trim().parse::<i64>() {
                     return Instr::AdjustDsp(-v);
+                }
+            }
+            // `mov [rbp+disp], <src>` (store) or `mov <dst>, [rbp+disp]` (load).
+            // Only [rbp]-relative movs structure; [rax]/imm/reg-reg stay Raw.
+            if let Some(rest) = t.strip_prefix("mov ") {
+                if let Some((a, b)) = rest.split_once(", ") {
+                    if let Some(disp) = parse_rbp_mem(a) {
+                        return Instr::StoreCell {
+                            disp,
+                            src: b.to_string(),
+                        };
+                    }
+                    if let Some(disp) = parse_rbp_mem(b) {
+                        return Instr::LoadCell {
+                            dst: a.to_string(),
+                            disp,
+                        };
+                    }
                 }
             }
             Instr::Raw(line.to_string())
@@ -990,6 +1040,12 @@ fn render(instrs: &[Instr]) -> String {
         match i {
             Instr::AdjustDsp(n) if *n >= 0 => s.push_str(&format!("    add rbp, {n}\n")),
             Instr::AdjustDsp(n) => s.push_str(&format!("    sub rbp, {}\n", -n)),
+            Instr::LoadCell { dst, disp } => {
+                s.push_str(&format!("    mov {dst}, {}\n", mem_rbp(*disp)))
+            }
+            Instr::StoreCell { disp, src } => {
+                s.push_str(&format!("    mov {}, {src}\n", mem_rbp(*disp)))
+            }
             Instr::Raw(l) => {
                 s.push_str(l);
                 s.push('\n');
@@ -1247,6 +1303,31 @@ mod tests {
                 "round-trip not identity for {b:?}"
             );
         }
+    }
+
+    #[test]
+    fn instr_structures_rbp_cells_and_leaves_program_mem_raw() {
+        // `over` ( a b -- a b a ): spill TOS below, reload NOS -> both a
+        // StoreCell and a LoadCell must appear (else 2.2 forwarding sees nothing).
+        let asm = lower(&[Token::Stack(StackOp::Over)], "rt").unwrap();
+        let instrs = parse_instrs(&asm);
+        assert!(
+            instrs.iter().any(|i| matches!(i, Instr::StoreCell { .. })),
+            "over should structure a StoreCell: {instrs:?}"
+        );
+        assert!(
+            instrs.iter().any(|i| matches!(i, Instr::LoadCell { .. })),
+            "over should structure a LoadCell: {instrs:?}"
+        );
+        // `@` ( a -- *a ) touches program memory [rax], which must stay Raw —
+        // never misread as a data-stack cell.
+        let fetch = parse_instrs(&lower(&[Token::Mem(MemOp::Fetch)], "rt").unwrap());
+        assert!(
+            !fetch
+                .iter()
+                .any(|i| matches!(i, Instr::LoadCell { .. } | Instr::StoreCell { .. })),
+            "[rax] program memory must stay Raw: {fetch:?}"
+        );
     }
 
     // ---- unified reduce engine: cascades a fixed pipeline misses ---------
