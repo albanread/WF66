@@ -190,6 +190,99 @@ fn wf66_strength_reduce_matches_eager_oracle() {
 }
 
 #[test]
+fn wf66_size_report() {
+    // Eager-vs-WF66 compiled body size for WF66-eligible words (literals +
+    // arithmetic, no shuffles). Prints with `--nocapture`. Non-eligible words
+    // fall back to eager -> identical size.
+    fn body_len(s: &Wf64Session, name: &str) -> u64 {
+        s.debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some(b - a) } else { None })
+            .unwrap_or(0)
+    }
+    let defs = [
+        // input-dependent (expect parity with eager's peephole layer)
+        ": dbl 2 * ;",
+        ": bar 5 * 2 + ;",
+        ": poly 3 + 7 * 11 - 13 + 17 * 19 - 23 + ;",
+        // pure compile-time constant expressions (WF66 folds the whole chain to
+        // one push; eager's one-literal watermark cannot)
+        ": k10 2 3 * 4 + ;",
+        ": k6 1 2 + 2 * ;",
+        ": kbig 1000 1000 * ;",
+        ": kchain 5 7 + 11 * 13 - ;",
+        // not eligible (dup) -> falls back, expect identical
+        ": sq dup * ;",
+    ];
+    eprintln!("\n  word     eager   wf66   delta");
+    for def in defs {
+        let word = def.split_whitespace().nth(1).unwrap().to_string();
+        let src = format!("{def}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap();
+            body_len(&s, &word)
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap();
+            body_len(&s, &word)
+        };
+        eprintln!(
+            "  {word:<8} {eager:>4}B  {wf66:>4}B   {:+}",
+            wf66 as i64 - eager as i64
+        );
+    }
+    eprintln!();
+}
+
+#[test]
+fn wf66_actually_rewrites_not_falls_back() {
+    // Regression guard for the `;` self-taint bug: WF66 must genuinely rewrite a
+    // deferrable body, not silently fall back to eager. `: tw 2 3 * 4 + ;` folds
+    // to a single push-10 (a constant); eager computes it at runtime, so the
+    // emitted bytes MUST differ — and both must still produce 10.
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    let def = ": tw 2 3 * 4 + ;\nbye\n";
+    let eager_bytes = {
+        let mut s = sess();
+        s.eval(def).unwrap();
+        body(&s, "tw")
+    };
+    let wf66_bytes = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(def).unwrap();
+        body(&s, "tw")
+    };
+    assert_ne!(
+        eager_bytes, wf66_bytes,
+        "WF66 produced identical bytes to eager — it fell back instead of rewriting"
+    );
+
+    let run = ": tw 2 3 * 4 + ;\ntw .\nbye\n";
+    let eager_out = {
+        let mut s = sess();
+        s.eval(run).unwrap()
+    };
+    let wf66_out = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(run).unwrap()
+    };
+    assert_eq!(eager_out, wf66_out, "WF66 result differs from eager");
+    assert!(wf66_out.contains("10"), "expected 2 3 * 4 + = 10, got {wf66_out:?}");
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.

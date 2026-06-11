@@ -875,6 +875,9 @@ thread_local! {
 /// Start capturing a new definition (from `:`). Arg: UP. Returns 0.
 #[no_mangle]
 pub extern "C" fn rt_ir_begin(_up: u64) -> u64 {
+    if wf66_dbg() {
+        eprintln!("[wf66] begin");
+    }
     WF66_IR.with(|b| *b.borrow_mut() = crate::wf66::IrBuilder::new());
     0
 }
@@ -906,14 +909,40 @@ fn wf66_fop_of(up: u64, xt: u64) -> Option<crate::wf66::Fop> {
 /// non-deferrable so the eager body is kept. Arg: UP, xt. Returns 0.
 #[no_mangle]
 pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
+    // `;` reaches this hook as an immediate word during its own dispatch, just
+    // before its body runs the finalizer. It is the terminator, not body content
+    // — skip it so it does not taint the span.
+    let semi = unsafe { *((up + crate::USER_WF66_SEMI) as *const u64) };
+    if xt == semi {
+        return 0;
+    }
     WF66_IR.with(|b| {
         let mut b = b.borrow_mut();
         match wf66_fop_of(up, xt) {
-            Some(f) => b.inline(f),
-            None => b.word(xt),
+            Some(f) => {
+                if wf66_dbg() {
+                    eprintln!("[wf66] word xt={xt:#x} -> {f:?}");
+                }
+                b.inline(f);
+            }
+            None => {
+                if wf66_dbg() {
+                    eprintln!(
+                        "[wf66] word xt={xt:#x} -> TAINT (add={:#x} sub={:#x} mul={:#x})",
+                        unsafe { *((up + crate::USER_WF66_VOC_ADD) as *const u64) },
+                        unsafe { *((up + crate::USER_WF66_VOC_SUB) as *const u64) },
+                        unsafe { *((up + crate::USER_WF66_VOC_MUL) as *const u64) },
+                    );
+                }
+                b.word(xt);
+            }
         }
     });
     0
+}
+
+fn wf66_dbg() -> bool {
+    std::env::var_os("WF66_DEBUG").is_some()
 }
 
 /// Mark the span non-deferrable: an immediate word ran during compile and its
@@ -933,17 +962,32 @@ pub extern "C" fn rt_ir_taint(_up: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
     unsafe { *((up + crate::USER_WF66_REC) as *mut u64) = 0 };
-    let bytes = WF66_IR.with(|b| crate::wf66::compile_body_bytes(b.borrow().tokens()));
+    let bytes = WF66_IR.with(|b| {
+        let b = b.borrow();
+        if wf66_dbg() {
+            eprintln!("[wf66] finalize: {} tokens {:?}", b.tokens().len(), b.tokens());
+        }
+        crate::wf66::compile_body_bytes(b.tokens())
+    });
     let bytes = match bytes {
         Ok(b) => b,
-        Err(_) => return 0, // non-deferrable / lower failed -> keep eager body
+        Err(e) => {
+            if wf66_dbg() {
+                eprintln!("[wf66] finalize: keep eager ({e})");
+            }
+            return 0; // non-deferrable / lower failed -> keep eager body
+        }
     };
+    if wf66_dbg() {
+        eprintln!("[wf66] finalize: REWRITE {} bytes", bytes.len());
+    }
     let latest = unsafe { *((up + crate::USER_LATEST_VAR) as *const u64) };
     if latest == 0 {
         return 0;
     }
-    // dh_xtptr (header + 0x10) is the colon body start.
-    let body_start = unsafe { *((latest + 0x10) as *const u64) };
+    // dh_xtptr (header + 0x10) is the colon body start. Headers are not
+    // 8-aligned (variable-length names), so read it unaligned.
+    let body_start = unsafe { std::ptr::read_unaligned((latest + 0x10) as *const u64) };
     if body_start == 0 {
         return 0;
     }

@@ -800,6 +800,7 @@ pub(crate) const USER_WF66_VOC_MUL: u64 = 0x19E0;  // *   (times)
 pub(crate) const USER_WF66_VOC_AND: u64 = 0x19E8;  // and (and_)
 pub(crate) const USER_WF66_VOC_OR:  u64 = 0x19F0;  // or  (or_)
 pub(crate) const USER_WF66_VOC_XOR: u64 = 0x19F8;  // xor (xor_)
+pub(crate) const USER_WF66_SEMI:    u64 = 0x1A00;  // xt of `;` — transparent to capture
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1756,6 +1757,10 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_AND, wf66_and);
         session.write_user_u64(USER_WF66_VOC_OR,  wf66_or);
         session.write_user_u64(USER_WF66_VOC_XOR, wf66_xor);
+        // `;` dispatches as an immediate word through the convergence point; mark
+        // its xt so capture treats it as transparent (a terminator, not body).
+        let wf66_semi = session.jit.lookup_addr("semicolon").context("wf66 semicolon")?;
+        session.write_user_u64(USER_WF66_SEMI, wf66_semi);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

@@ -174,14 +174,15 @@ proc(interpret_source)
     ja      .compile_exec_ready
     add     DSP, cell                       ; normalize to internal empty-stack form
 .compile_exec_ready:
-    ; WF66: an immediate word is about to run during capture; its emission is
-    ; opaque to the IR, so taint the span (forces the eager body to stand).
+    ; WF66: an immediate word is about to run during capture. Record it by xt
+    ; (rdx): `;` is skipped as the terminator, every other immediate taints the
+    ; span (its emission is opaque to the IR), forcing the eager body to stand.
     cmp     qword ptr [UP + user_WF66_REC], 0
     je      .cer_eager
     push    rcx
     push    rdx
     mov     rcx, UP
-    win64_call(rt_ir_taint)
+    win64_call(rt_ir_word)              ; rdx = xt (preserved into the call)
     pop     rdx
     pop     rcx
 .cer_eager:
