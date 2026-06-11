@@ -424,6 +424,60 @@ fn wf66_folds_through_derived_ops() {
 }
 
 #[test]
+fn wf66_inlines_and_folds_across_call_boundary() {
+    // Phase 3: a small WF66-compiled word is spliced into its caller, then folds
+    // across the former call boundary. `: t32 32 ;  : addt t32 + ;` -> addt is
+    // `add rax, 32` with no call. Bytes must differ from eager (which emits a
+    // call to t32), and the result must match eager.
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    let prog = ": t32 32 ;\n: addt t32 + ;\nbye\n";
+    let eager = {
+        let mut s = sess();
+        s.eval(prog).unwrap();
+        body(&s, "addt")
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(prog).unwrap();
+        body(&s, "addt")
+    };
+    assert_ne!(eager, wf66, "WF66 should inline t32 (no call), differing from eager");
+    assert!(
+        !wf66.contains(&0xE8),
+        "WF66 addt should contain no E8 CALL after inlining: {wf66:02x?}"
+    );
+
+    // Correctness over inputs, and a multi-level inline chain.
+    let run = "\
+: t32 32 ;\n\
+: addt t32 + ;\n\
+: addt2 addt addt ;\n\
+10 addt .\n\
+0 addt2 .\n\
+bye\n";
+    let eager_out = {
+        let mut s = sess();
+        s.eval(run).unwrap()
+    };
+    let wf66_out = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(run).unwrap()
+    };
+    assert_eq!(eager_out, wf66_out, "WF66 != eager for inline chain");
+    assert!(wf66_out.contains("42")); // 10 + 32
+    assert!(wf66_out.contains("64")); // 0 + 32 + 32
+}
+
+#[test]
 fn wf66_does_not_disturb_subsequent_eager_defs() {
     // After a WF66 rewrite, a following (non-deferrable) definition still
     // compiles and runs correctly — capture state was cleared at `;`.

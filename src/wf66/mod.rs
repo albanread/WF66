@@ -213,6 +213,13 @@ impl IrBuilder {
         self.tokens.push(Token::Mem(op));
     }
 
+    /// Splice a callee's token body into the current definition (Phase 3
+    /// inlining). The spliced tokens then participate in the caller's fold /
+    /// strength-reduce / DCE passes — folding across the former call boundary.
+    pub fn splice(&mut self, toks: &[Token]) {
+        self.tokens.extend_from_slice(toks);
+    }
+
     pub fn word(&mut self, xt: u64) {
         self.tokens.push(Token::Word { xt });
     }

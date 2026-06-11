@@ -2337,6 +2337,7 @@ impl Wf64Session {
         self.write_user_u64(USER_PIN_RECORDING, 0);
         self.write_user_u64(USER_WF66_REC, 0);
         self.write_user_u64(USER_WF66_ENABLE, 0);
+        runtime::wf66_clear_inline_cache(); // forgotten words' xts can be reused
         self.write_user_u64(USER_PIN_REPLAYING, 0);
         self.write_user_u64(USER_PIN_NEST,      0);
         self.write_user_u64(USER_PIN_BUF_LEN,   0);

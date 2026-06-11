@@ -870,6 +870,22 @@ pub extern "C" fn rt_pin_emit_access(up: u64, encoded: u64) -> u64 {
 thread_local! {
     static WF66_IR: std::cell::RefCell<crate::wf66::IrBuilder> =
         std::cell::RefCell::new(crate::wf66::IrBuilder::new());
+    // Phase 3 inlining: xt (colon body start) -> the word's raw token body, for
+    // small deferrable words. A later definition that calls such a word splices
+    // these tokens instead of tainting. Cleared on session reset (a forgotten
+    // word's xt could be reused).
+    static WF66_INLINE: std::cell::RefCell<std::collections::HashMap<u64, Vec<crate::wf66::Token>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Max token-body size eligible for inlining (larger callees stay calls, i.e.
+/// taint the caller until the cross-word ABI lands in Phase 4).
+const WF66_INLINE_MAX: usize = 16;
+
+/// Clear the inline cache. Called from `Wf64Session::reset()` because a rolled-
+/// back word's xt can be reused by the next definition.
+pub fn wf66_clear_inline_cache() {
+    WF66_INLINE.with(|m| m.borrow_mut().clear());
 }
 
 /// Start capturing a new definition (from `:`). Arg: UP. Returns 0.
@@ -982,6 +998,11 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
             }
             b.lit(k);
             b.inline(f);
+        } else if let Some(toks) = WF66_INLINE.with(|m| m.borrow().get(&xt).cloned()) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> INLINE {} tokens", toks.len());
+            }
+            b.splice(&toks);
         } else {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> TAINT");
@@ -1013,14 +1034,11 @@ pub extern "C" fn rt_ir_taint(_up: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
     unsafe { *((up + crate::USER_WF66_REC) as *mut u64) = 0 };
-    let bytes = WF66_IR.with(|b| {
-        let b = b.borrow();
-        if wf66_dbg() {
-            eprintln!("[wf66] finalize: {} tokens {:?}", b.tokens().len(), b.tokens());
-        }
-        crate::wf66::compile_body_bytes(b.tokens())
-    });
-    let bytes = match bytes {
+    let toks: Vec<crate::wf66::Token> = WF66_IR.with(|b| b.borrow().tokens().to_vec());
+    if wf66_dbg() {
+        eprintln!("[wf66] finalize: {} tokens {:?}", toks.len(), toks);
+    }
+    let bytes = match crate::wf66::compile_body_bytes(&toks) {
         Ok(b) => b,
         Err(e) => {
             if wf66_dbg() {
@@ -1041,6 +1059,11 @@ pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
     let body_start = unsafe { std::ptr::read_unaligned((latest + 0x10) as *const u64) };
     if body_start == 0 {
         return 0;
+    }
+    // Cache small deferrable bodies (keyed by xt) so later definitions can
+    // inline them (Phase 3).
+    if toks.len() <= WF66_INLINE_MAX {
+        WF66_INLINE.with(|m| m.borrow_mut().insert(body_start, toks));
     }
     unsafe {
         *((up + crate::USER_HERE_VAR) as *mut u64) = body_start;
