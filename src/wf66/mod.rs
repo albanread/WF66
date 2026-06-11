@@ -961,8 +961,16 @@ enum Instr {
     LoadCell { dst: String, disp: i64 },
     /// `mov [rbp+disp], <src>`: spill a register to a data-stack cell.
     StoreCell { disp: i64, src: String },
+    /// `mov <dst>, <src>`: a register-to-register move (rbp-independent, so it
+    /// neither moves the stack pointer nor bounds a window).
+    RegMove { dst: String, src: String },
     /// Any other emitted line, verbatim (without its trailing newline).
     Raw(String),
+}
+
+/// True when `s` is a bare register operand (not memory, not an immediate).
+fn is_reg(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()) && s.parse::<i64>().is_err()
 }
 
 /// Format an `[rbp+disp]` operand exactly as the emitters do.
@@ -1025,6 +1033,13 @@ fn parse_instrs(asm: &str) -> Vec<Instr> {
                             disp,
                         };
                     }
+                    // `mov <reg>, <reg>`: a register-to-register move.
+                    if is_reg(a) && is_reg(b) {
+                        return Instr::RegMove {
+                            dst: a.to_string(),
+                            src: b.to_string(),
+                        };
+                    }
                 }
             }
             Instr::Raw(line.to_string())
@@ -1046,6 +1061,7 @@ fn render(instrs: &[Instr]) -> String {
             Instr::StoreCell { disp, src } => {
                 s.push_str(&format!("    mov {}, {src}\n", mem_rbp(*disp)))
             }
+            Instr::RegMove { dst, src } => s.push_str(&format!("    mov {dst}, {src}\n")),
             Instr::Raw(l) => {
                 s.push_str(l);
                 s.push('\n');
@@ -1083,6 +1099,7 @@ fn coalesce_dsp(instrs: Vec<Instr>) -> Vec<Instr> {
                 disp: disp + delta,
                 src,
             }),
+            Instr::RegMove { dst, src } => out.push(Instr::RegMove { dst, src }),
             Instr::Raw(l) => {
                 if delta != 0 {
                     out.push(Instr::AdjustDsp(delta));
@@ -1098,64 +1115,189 @@ fn coalesce_dsp(instrs: Vec<Instr>) -> Vec<Instr> {
     out
 }
 
-/// Store->load forwarding (Step 2.2): within a barrier-free window, a `LoadCell`
-/// of a physical data-stack cell whose value is already in a live register is
-/// replaced by a register move — or dropped entirely if it's already in the
-/// destination register.
-///
-/// Soundness rests on the window model: any `Raw` line (a Fop touching `[rbp]`, a
-/// register-clobbering `mov`, a label, a call, `ret`) ends the window and clears
-/// all knowledge. Inside a window the only ops are `AdjustDsp` (moves rbp — the
-/// running `delta` keeps cell identity absolute), `LoadCell` (the only register
-/// write), and `StoreCell` (a memory write). So "register r still holds cell c"
-/// can never be silently invalidated: a reg is only re-written by a `LoadCell`
-/// (we drop r's cell mappings then), a cell only by a `StoreCell` (we overwrite
-/// its mapping), and anything we can't see is a `Raw` barrier.
-fn forward_loads(instrs: Vec<Instr>) -> Vec<Instr> {
-    use std::collections::HashMap;
+/// An abstract value flowing through a barrier-free window: it traces back either
+/// to the register `rax` at window entry, or to the entry content of some slot.
+/// (Pure movement windows never synthesize new values — only shuffle these.)
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Val {
+    Rax,
+    Slot(i64),
+}
+
+/// Sub-register aliases to also test in the live-out guard (so a window that
+/// loads `rcx` is held back when the following barrier reads `cl`, etc.).
+fn reg_family(r: &str) -> &'static [&'static str] {
+    match r {
+        "rcx" => &["ecx", "cx", "cl", "ch"],
+        "rdx" => &["edx", "dx", "dl", "dh"],
+        _ => &[],
+    }
+}
+
+/// Window fusion (Step 2.4): the heart of "auto-pick instead of stack ops".
+/// After coalescing, a barrier-free window is pure fixed-offset slot addressing.
+/// Rather than replaying each stack op's moves, recognize the *whole window* as a
+/// permutation/duplication pattern: symbolically simulate it to the net map
+/// (final rax + each changed slot) <- (entry rax + entry slots), then emit the
+/// MINIMAL parallel-move that realizes it. `rot rot` (8 accesses) collapses to its
+/// net `-rot` (4); redundant reloads vanish; nothing is replayed.
+fn window_fuse(instrs: Vec<Instr>) -> Vec<Instr> {
     let mut out: Vec<Instr> = Vec::with_capacity(instrs.len());
-    let mut delta: i64 = 0; // rbp offset from the current window's start
-    let mut cell: HashMap<i64, String> = HashMap::new(); // phys offset -> reg holding it
-    for ins in instrs {
-        match ins {
-            Instr::AdjustDsp(n) => {
-                delta += n;
-                out.push(Instr::AdjustDsp(n));
-            }
-            Instr::StoreCell { disp, src } => {
-                // the cell now equals src's value
-                cell.insert(delta + disp, src.clone());
-                out.push(Instr::StoreCell { disp, src });
-            }
-            Instr::LoadCell { dst, disp } => {
-                let phys = delta + disp;
-                match cell.get(&phys) {
-                    // already in the destination: the load is redundant, drop it
-                    Some(r) if *r == dst => {}
-                    // in another register: forward as a reg move
-                    Some(r) => {
-                        let mv = format!("    mov {dst}, {r}");
-                        cell.retain(|_, v| *v != dst); // dst is clobbered
-                        cell.insert(phys, dst.clone()); // ...and now holds this cell
-                        out.push(Instr::Raw(mv));
-                    }
-                    // genuine load: dst is clobbered, then holds this cell
-                    None => {
-                        cell.retain(|_, v| *v != dst);
-                        cell.insert(phys, dst.clone());
-                        out.push(Instr::LoadCell { dst, disp });
-                    }
-                }
-            }
-            Instr::Raw(l) => {
-                // barrier: anything we can't model ends the window
-                cell.clear();
-                delta = 0;
-                out.push(Instr::Raw(l));
-            }
+    let mut i = 0;
+    while i < instrs.len() {
+        if matches!(instrs[i], Instr::Raw(_)) {
+            out.push(instrs[i].clone());
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < instrs.len() && !matches!(instrs[i], Instr::Raw(_)) {
+            i += 1;
+        }
+        let window = &instrs[start..i];
+        // text of the immediately-following Raw run, for the live-out guard
+        let mut follow = String::new();
+        let mut k = i;
+        while let Some(Instr::Raw(l)) = instrs.get(k) {
+            follow.push_str(l);
+            follow.push('\n');
+            k += 1;
+        }
+        match fuse_window(window, &follow) {
+            Some(em) => out.extend(em),
+            None => out.extend(window.iter().cloned()), // unfusible: emit verbatim
         }
     }
     out
+}
+
+/// Fuse one barrier-free window to its minimal parallel-move, or `None` to keep
+/// it verbatim when fusion would be unsafe (unknown source register, a load/store
+/// after the coalesced adjust, a defined scratch register read by the following
+/// barrier, or more live temporaries than the spare pool holds).
+fn fuse_window(window: &[Instr], follow: &str) -> Option<Vec<Instr>> {
+    use std::collections::HashMap;
+    // 1. split movement ops from the (single, trailing) coalesced adjust
+    let mut net_delta = 0i64;
+    let mut moves: Vec<&Instr> = Vec::new();
+    let mut adjust_seen = false;
+    for ins in window {
+        match ins {
+            Instr::AdjustDsp(n) => {
+                net_delta += n;
+                adjust_seen = true;
+            }
+            Instr::LoadCell { .. } | Instr::StoreCell { .. } | Instr::RegMove { .. } => {
+                if adjust_seen {
+                    return None; // movement after the adjust: not coalesced as expected
+                }
+                moves.push(ins);
+            }
+            Instr::Raw(_) => return None,
+        }
+    }
+    // 2. symbolic simulation -> net register/slot map
+    let mut reg: HashMap<&str, Val> = HashMap::new();
+    reg.insert("rax", Val::Rax);
+    let mut slot: HashMap<i64, Val> = HashMap::new();
+    let mut defined: Vec<&str> = Vec::new(); // non-rax registers this window writes
+    for ins in &moves {
+        match ins {
+            Instr::LoadCell { dst, disp } => {
+                let v = slot.get(disp).copied().unwrap_or(Val::Slot(*disp));
+                reg.insert(dst.as_str(), v);
+                if dst != "rax" && !defined.contains(&dst.as_str()) {
+                    defined.push(dst.as_str());
+                }
+            }
+            Instr::StoreCell { disp, src } => {
+                let v = *reg.get(src.as_str())?;
+                slot.insert(*disp, v);
+            }
+            Instr::RegMove { dst, src } => {
+                let v = *reg.get(src.as_str())?;
+                reg.insert(dst.as_str(), v);
+                if dst != "rax" && !defined.contains(&dst.as_str()) {
+                    defined.push(dst.as_str());
+                }
+            }
+            Instr::Raw(_) | Instr::AdjustDsp(_) => unreachable!(),
+        }
+    }
+    // 3. live-out scratch guard: a scratch reg this window defines must not be
+    //    read by the following barrier (settle keeps scratch dead across windows,
+    //    so this only fires inside a single op's lowering, e.g. `!`/`c!`).
+    for r in &defined {
+        if follow.contains(*r) || reg_family(r).iter().any(|n| follow.contains(n)) {
+            return None;
+        }
+    }
+    // 4. assignments: realize every CHANGED slot (no liveness filter -> sound
+    //    across pushes/barriers) plus rax. Unchanged slots keep their value.
+    let final_rax = *reg.get("rax").unwrap();
+    let mut slot_assigns: Vec<(i64, Val)> = slot
+        .iter()
+        .filter(|(d, v)| **v != Val::Slot(**d))
+        .map(|(d, v)| (*d, *v))
+        .collect();
+    slot_assigns.sort_by_key(|(d, _)| *d);
+    // 5. emit the minimal parallel-move
+    let dest_slots: std::collections::HashSet<i64> = slot_assigns.iter().map(|(d, _)| *d).collect();
+    // source slots that are ALSO written must be snapshotted before any write
+    let mut preserve: Vec<i64> = Vec::new();
+    let mut note = |v: &Val, preserve: &mut Vec<i64>| {
+        if let Val::Slot(s) = v {
+            if dest_slots.contains(s) && !preserve.contains(s) {
+                preserve.push(*s);
+            }
+        }
+    };
+    note(&final_rax, &mut preserve);
+    for (_, v) in &slot_assigns {
+        note(v, &mut preserve);
+    }
+    let needs_transient = slot_assigns
+        .iter()
+        .any(|(_, v)| matches!(v, Val::Slot(s) if !dest_slots.contains(s)))
+        || matches!(final_rax, Val::Slot(s) if !dest_slots.contains(&s) && preserve.contains(&s));
+    let pool = ["rsi", "rdi", "r8", "r9", "r10", "r11", "rcx", "rdx"];
+    if preserve.len() + usize::from(needs_transient) > pool.len() {
+        return None;
+    }
+    let mut emitted: Vec<Instr> = Vec::new();
+    let mut tmp_of: HashMap<i64, &str> = HashMap::new();
+    for (idx, s) in preserve.iter().enumerate() {
+        emitted.push(Instr::Raw(format!("    mov {}, {}", pool[idx], mem_rbp(*s))));
+        tmp_of.insert(*s, pool[idx]);
+    }
+    let transient = pool.get(preserve.len()).copied();
+    // changed slots (rax still holds entry value; written last)
+    for (d, v) in &slot_assigns {
+        match v {
+            Val::Rax => emitted.push(Instr::Raw(format!("    mov {}, rax", mem_rbp(*d)))),
+            Val::Slot(s) => {
+                if let Some(t) = tmp_of.get(s) {
+                    emitted.push(Instr::Raw(format!("    mov {}, {t}", mem_rbp(*d))));
+                } else {
+                    let t = transient?;
+                    emitted.push(Instr::Raw(format!("    mov {t}, {}", mem_rbp(*s))));
+                    emitted.push(Instr::Raw(format!("    mov {}, {t}", mem_rbp(*d))));
+                }
+            }
+        }
+    }
+    // rax last
+    if let Val::Slot(s) = final_rax {
+        if let Some(t) = tmp_of.get(&s) {
+            emitted.push(Instr::Raw(format!("    mov rax, {t}")));
+        } else {
+            emitted.push(Instr::Raw(format!("    mov rax, {}", mem_rbp(s))));
+        }
+    }
+    if net_delta != 0 {
+        emitted.push(Instr::AdjustDsp(net_delta));
+    }
+    Some(emitted)
 }
 
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
@@ -1220,8 +1362,9 @@ pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
     }
     let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
     // Deferred assembly: lex to instruction records, reduce, re-render.
-    // coalesce rbp adjusts first (absolute disps), then forward store->load.
-    let asm = render(&forward_loads(coalesce_dsp(parse_instrs(&asm))));
+    // coalesce rbp adjusts first (absolute disps), then fuse each window to its
+    // minimal parallel-move (auto-pick instead of replaying stack ops).
+    let asm = render(&window_fuse(coalesce_dsp(parse_instrs(&asm))));
     let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
     let fn_off = *module
         .symbols
@@ -1433,6 +1576,62 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "diagnostic: run with --ignored --nocapture to inspect 2.4 headroom"]
+    fn wf66_traffic_probe() {
+        // Diagnostic: the current optimized body for a few shuffle-chains, with
+        // the count of data-stack memory accesses ([rbp]). Shows that post-
+        // coalesce the window is pure offset addressing (auto-pick), and that
+        // replaying each op's moves is redundant across chains (e.g. rot rot
+        // replays 8 accesses for a permutation realizable in ~4).
+        use StackOp::*;
+        let cases: &[(&str, Vec<Token>)] = &[
+            ("dup over", vec![Token::Stack(Dup), Token::Stack(Over)]),
+            ("over over", vec![Token::Stack(Over), Token::Stack(Over)]),
+            ("swap over", vec![Token::Stack(Swap), Token::Stack(Over)]),
+            (
+                "rot rot",
+                vec![Token::Stack(Rot), Token::Stack(Rot)],
+            ),
+            (
+                "2dup 2dup",
+                vec![Token::Stack(TwoDup), Token::Stack(TwoDup)],
+            ),
+            (
+                "swap swap",
+                vec![Token::Stack(Swap), Token::Stack(Swap)],
+            ),
+            (
+                "over swap drop",
+                vec![Token::Stack(Over), Token::Stack(Swap), Token::Stack(Drop)],
+            ),
+        ];
+        eprintln!("\n  --- 2.4 traffic probe (optimized body) ---");
+        for (name, toks) in cases {
+            let reduced = reduce(toks);
+            let asm = lower(&reduced, "p").unwrap();
+            let opt = window_fuse(coalesce_dsp(parse_instrs(&asm)));
+            let mem = opt
+                .iter()
+                .filter(|i| {
+                    matches!(i, Instr::LoadCell { .. } | Instr::StoreCell { .. })
+                        || matches!(i, Instr::Raw(l) if l.contains("[rbp"))
+                })
+                .count();
+            eprintln!("  {name:<16} data-stack mem-accesses = {mem}");
+            for i in &opt {
+                let line = render(std::slice::from_ref(i));
+                let l = line.trim_end();
+                let t = l.trim_start();
+                if t.starts_with('.') || t == "p:" || t.contains("ret") || t.is_empty() {
+                    continue; // skip preamble/label/ret noise
+                }
+                eprintln!("      {l}");
+            }
+        }
+        eprintln!();
+    }
+
     // ---- rbp-coalescing (Step 2.3) --------------------------------------
 
     #[test]
@@ -1519,19 +1718,19 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_then_forward_shrinks_dup_over() {
-        // composed: coalesce removes interior adjusts, forward then drops the now-
-        // absolute redundant reload -> fewer instrs and a single rbp adjust.
+    fn coalesce_then_fuse_shrinks_dup_over() {
+        // composed: coalesce removes interior adjusts, fusion then realizes only
+        // the changed cells -> fewer instrs and a single rbp adjust.
         let asm = lower(
             &[Token::Stack(StackOp::Dup), Token::Stack(StackOp::Over)],
             "rt",
         )
         .unwrap();
         let base = parse_instrs(&asm);
-        let opt = forward_loads(coalesce_dsp(base.clone()));
+        let opt = window_fuse(coalesce_dsp(base.clone()));
         assert!(
             opt.len() < base.len(),
-            "coalesce+forward should shrink: {base:?} -> {opt:?}"
+            "coalesce+fuse should shrink: {base:?} -> {opt:?}"
         );
         assert!(
             opt.iter()
@@ -1543,126 +1742,91 @@ mod tests {
         assert!(wfasm::rasm::assemble(&render(&opt)).is_ok());
     }
 
-    // ---- store->load forwarding (Step 2.2) ------------------------------
+    // ---- window fusion / auto-pick (Step 2.4) ---------------------------
 
-    #[test]
-    fn forward_load_to_reg_move() {
-        // store rax -> cell; rbp moves; load that same physical cell into rcx.
-        // rax still holds it -> the load becomes `mov rcx, rax`.
-        let buf = vec![
-            Instr::StoreCell {
-                disp: -8,
-                src: "rax".into(),
-            },
-            Instr::AdjustDsp(-8),
-            Instr::LoadCell {
-                dst: "rcx".into(),
-                disp: 0,
-            },
-        ];
-        assert_eq!(
-            forward_loads(buf),
-            vec![
-                Instr::StoreCell {
-                    disp: -8,
-                    src: "rax".into()
-                },
-                Instr::AdjustDsp(-8),
-                Instr::Raw("    mov rcx, rax".into()),
-            ]
-        );
+    /// Full deferred-assembly pipeline on a token body, as the compile path runs
+    /// it: reduce -> lower -> parse -> coalesce -> window_fuse.
+    fn fused(toks: &[Token]) -> Vec<Instr> {
+        let asm = lower(&reduce(toks), "t").unwrap();
+        window_fuse(coalesce_dsp(parse_instrs(&asm)))
+    }
+
+    fn mem_accesses(is: &[Instr]) -> usize {
+        is.iter()
+            .filter(|i| {
+                matches!(i, Instr::LoadCell { .. } | Instr::StoreCell { .. })
+                    || matches!(i, Instr::Raw(l) if l.contains("[rbp"))
+            })
+            .count()
     }
 
     #[test]
-    fn forward_drops_redundant_reload() {
-        // load back into the same register that already holds the cell -> dropped.
-        let buf = vec![
-            Instr::StoreCell {
-                disp: -8,
-                src: "rax".into(),
-            },
-            Instr::AdjustDsp(-8),
-            Instr::LoadCell {
-                dst: "rax".into(),
-                disp: 0,
-            },
-        ];
-        assert_eq!(
-            forward_loads(buf),
-            vec![
-                Instr::StoreCell {
-                    disp: -8,
-                    src: "rax".into()
-                },
-                Instr::AdjustDsp(-8),
-            ]
-        );
+    fn fuse_collapses_rot_rot_to_negrot_cost() {
+        use StackOp::*;
+        // rot rot == -rot: a 3-cycle realizable in 4 mem-accesses, not 8 replayed.
+        let rr = fused(&[Token::Stack(Rot), Token::Stack(Rot)]);
+        assert_eq!(mem_accesses(&rr), 4, "rot rot should fuse to ~4: {rr:?}");
+        // ...and it equals the cost of the single primitive -rot it's equivalent to.
+        let nr = fused(&[Token::Stack(NegRot)]);
+        assert_eq!(mem_accesses(&rr), mem_accesses(&nr));
+        assert!(wfasm::rasm::assemble(&render(&rr)).is_ok());
     }
 
     #[test]
-    fn forward_stops_at_raw_barrier() {
-        // a Raw line (here also clobbering rax) ends the window: no forwarding.
-        let buf = vec![
-            Instr::StoreCell {
-                disp: -8,
-                src: "rax".into(),
-            },
-            Instr::Raw("    mov rax, 5".into()),
-            Instr::AdjustDsp(-8),
-            Instr::LoadCell {
-                dst: "rcx".into(),
-                disp: 0,
-            },
-        ];
-        assert_eq!(forward_loads(buf.clone()), buf);
+    fn fuse_drops_redundant_reload_in_dup_over() {
+        use StackOp::*;
+        // dup over reloads a cell rax already holds; fusion realizes only the two
+        // changed cells (2 stores), no reload.
+        let f = fused(&[Token::Stack(Dup), Token::Stack(Over)]);
+        assert_eq!(mem_accesses(&f), 2, "dup over: {f:?}");
+        assert!(wfasm::rasm::assemble(&render(&f)).is_ok());
     }
 
     #[test]
-    fn forward_load_then_reload_after_clobber_is_not_forwarded() {
-        // store rax->cell; load cell into rax (clobbers rax); load cell again into
-        // rcx -> must forward from rax (which now holds it), NOT from a stale map.
-        let buf = vec![
-            Instr::StoreCell {
-                disp: 0,
-                src: "rax".into(),
-            },
-            Instr::LoadCell {
-                dst: "rax".into(),
-                disp: 0,
-            }, // redundant: rax already holds cell 0 -> dropped
-            Instr::LoadCell {
-                dst: "rcx".into(),
-                disp: 0,
-            }, // rax still holds cell 0 -> mov rcx, rax
-        ];
-        assert_eq!(
-            forward_loads(buf),
-            vec![
-                Instr::StoreCell {
-                    disp: 0,
-                    src: "rax".into()
-                },
-                Instr::Raw("    mov rcx, rax".into()),
-            ]
-        );
+    fn fuse_swap_over_saves_an_access() {
+        use StackOp::*;
+        // swap over: 4 replayed accesses -> 3 (and rax is never pointlessly reloaded).
+        let f = fused(&[Token::Stack(Swap), Token::Stack(Over)]);
+        assert_eq!(mem_accesses(&f), 3, "swap over: {f:?}");
+        assert!(wfasm::rasm::assemble(&render(&f)).is_ok());
     }
 
     #[test]
-    fn forward_dup_over_drops_a_reload_and_still_assembles() {
-        // end-to-end: `dup over` reloads a cell rax already holds; forwarding
-        // shrinks the buffer and the result must still encode.
-        let asm = lower(
-            &[Token::Stack(StackOp::Dup), Token::Stack(StackOp::Over)],
-            "rt",
-        )
-        .unwrap();
-        let before = parse_instrs(&asm);
-        let after = forward_loads(before.clone());
+    fn fuse_preserves_a_push_spill() {
+        // : w 5 ;  pushes 5: the spill of the old TOS to [rbp-8] must survive
+        // even though the rbp adjust that makes it live sits past the `mov eax,5`
+        // barrier (the no-liveness-filter soundness case).
+        let f = fused(&[Token::Lit(5)]);
+        let txt = render(&f);
         assert!(
-            after.len() < before.len(),
-            "forwarding should drop a reload: {before:?} -> {after:?}"
+            txt.contains("mov [rbp - 8], rax"),
+            "push spill must not be dropped: {txt}"
         );
-        assert!(wfasm::rasm::assemble(&render(&after)).is_ok());
+        assert!(wfasm::rasm::assemble(&txt).is_ok());
+    }
+
+    #[test]
+    fn fuse_keeps_mem_store_live_out_scratch_verbatim() {
+        use StackOp::*;
+        // `!` loads NOS into rcx then `mov [rax], rcx` (a Raw reading rcx). The
+        // window defining rcx must NOT be fused away (rcx is live into the barrier).
+        let f = fused(&[Token::Stack(Over), Token::Mem(MemOp::Store)]);
+        let txt = render(&f);
+        assert!(txt.contains("mov [rax], rcx"), "store body intact: {txt}");
+        // the rcx-defining load survives (coalesce may rebase its disp); it is not
+        // fused away, because rcx is read by the following `mov [rax], rcx`.
+        assert!(txt.contains("mov rcx, [rbp"), "rcx load preserved: {txt}");
+        assert!(wfasm::rasm::assemble(&txt).is_ok());
+    }
+
+    #[test]
+    fn fuse_window_unknown_source_bails() {
+        // a StoreCell whose src was never defined in the window -> keep verbatim.
+        let win = [Instr::StoreCell {
+            disp: -8,
+            src: "rbx".into(),
+        }];
+        assert_eq!(fuse_window(&win, ""), None);
     }
 
     // ---- unified reduce engine: cascades a fixed pipeline misses ---------
