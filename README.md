@@ -114,14 +114,24 @@ back-edge. (The MASM even runs an escape test WF66 omits and is *still* faster �
 the win is register-vs-memory for the loop state, not the arithmetic.)
 
 **This frames the scope deliberately.** The hand-MASM isn't doing whole-program
-magic — it's a *single self-contained word that owns the register file*, with
-nothing running between iterations to clobber it. WF66 targets exactly that scope:
-**leaf words** (and inlined hot paths), where it can likewise own the registers.
-Whole-program register allocation across calls is neither the goal nor achievable
-(a call clobbers caller-saved registers) — and it isn't needed, because the hot
-~10% of a program lives in leaf words. The remaining work is to own the registers
-*within a leaf word's loop* the way the MASM does (loop register allocation across
-the back-edge); that is the next frontier the benchmark now measures.
+magic, and it isn't a privilege the MASM has and a compiler doesn't: it keeps
+`zx`/`zy` in `xmm0`/`xmm1` across the loop **only because it makes no calls**, so
+the Win64 volatile registers are genuinely free there. Register residency is only
+ever valid inside a **call-free region** — the moment any code makes a call, it
+cannot own those registers across it (the callee may trash the caller-saved set
+and won't restore the caller-saved ones). So *no* general-purpose program and *no*
+compiler can claim global register state; the call-free span is the universal
+boundary, full stop.
+
+That makes WF66's scope the *correct* one, not a limitation. WF66 optimizes
+**leaf words** (and inlined hot paths) — exactly the call-free regions where
+owning the registers is legal in the first place — which is the same boundary the
+hand-MASM exploits. Whole-program register allocation across calls is not a thing
+to chase: it's unachievable (calls clobber registers) and unnecessary (the hot
+~10% of a program lives in leaf words). The remaining work is to own the registers
+*within a leaf word's loop* the way the MASM does — loop register allocation across
+the back-edge of a call-free loop — which is the next frontier the benchmark now
+measures.
 
 ## Status
 
