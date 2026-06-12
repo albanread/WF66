@@ -568,6 +568,22 @@ impl IrBuilder {
         self.tokens.push(Token::PickWord);
     }
 
+    pub fn fp_bin(&mut self, op: FpOp) {
+        self.tokens.push(Token::FpBin(op));
+    }
+
+    pub fn fp_neg(&mut self) {
+        self.tokens.push(Token::FpNeg);
+    }
+
+    pub fn fp_stack(&mut self, op: FpStackOp) {
+        self.tokens.push(Token::FpStack(op));
+    }
+
+    pub fn fp_mem(&mut self, op: FpMemOp) {
+        self.tokens.push(Token::FpMem(op));
+    }
+
     /// Splice a callee's token body into the current definition (Phase 3
     /// inlining). The spliced tokens then participate in the caller's fold /
     /// strength-reduce / DCE passes — folding across the former call boundary.

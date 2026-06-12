@@ -1816,6 +1816,61 @@ fn wf66_compile_metrics() {
 }
 
 #[test]
+fn wf66_fp_leaf_words_match_eager() {
+    // FP leaf words operate on caller-supplied FP-stack args. WF66 must compile
+    // them (no taint) and produce the same result as the eager kernel.
+    let cases: &[(&str, &str)] = &[
+        (": fadd f+ ;", "1.5e 2.25e fadd f. cr"),
+        (": fmul f* ;", "3e 4e fmul f. cr"),
+        (": fsub f- ;", "10e 3e fsub f. cr"),
+        (": fdiv f/ ;", "12e 4e fdiv f. cr"),
+        (": fsq fdup f* ;", "5e fsq f. cr"),
+        (": fn fnegate ;", "7e fn f. cr"),
+        (": faxpy fover f* f+ ;", "2e 3e 4e faxpy f. cr"),
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
+fn wf66_fp_word_is_actually_optimized() {
+    // Regression guard: a pure-FP leaf word must be WF66-compiled (deferrable),
+    // not fall back to eager — the body bytes must differ from the eager build.
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    let src = ": fsq fdup f* ;\nbye\n";
+    let eager = {
+        let mut s = sess();
+        s.eval(src).unwrap();
+        body(&s, "fsq")
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(src).unwrap();
+        body(&s, "fsq")
+    };
+    assert_ne!(eager, wf66, "fsq should be WF66-compiled (inlined), not eager");
+}
+
+#[test]
 fn load_source_file_provides_defer_defining_word() {
     let mut s = sess();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join("core.f");

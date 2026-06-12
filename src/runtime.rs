@@ -953,6 +953,40 @@ fn wf66_memop_of(up: u64, xt: u64) -> Option<crate::wf66::MemOp> {
     }
 }
 
+fn wf66_fpop_of(up: u64, xt: u64) -> Option<crate::wf66::FpOp> {
+    use crate::wf66::FpOp;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_FADD) => Some(FpOp::Add),
+        x if x == r(crate::USER_WF66_VOC_FSUB) => Some(FpOp::Sub),
+        x if x == r(crate::USER_WF66_VOC_FMUL) => Some(FpOp::Mul),
+        x if x == r(crate::USER_WF66_VOC_FDIV) => Some(FpOp::Div),
+        _ => None,
+    }
+}
+
+fn wf66_fpstack_of(up: u64, xt: u64) -> Option<crate::wf66::FpStackOp> {
+    use crate::wf66::FpStackOp;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_FDUP) => Some(FpStackOp::FDup),
+        x if x == r(crate::USER_WF66_VOC_FDROP) => Some(FpStackOp::FDrop),
+        x if x == r(crate::USER_WF66_VOC_FSWAP) => Some(FpStackOp::FSwap),
+        x if x == r(crate::USER_WF66_VOC_FOVER) => Some(FpStackOp::FOver),
+        _ => None,
+    }
+}
+
+fn wf66_fpmem_of(up: u64, xt: u64) -> Option<crate::wf66::FpMemOp> {
+    use crate::wf66::FpMemOp;
+    let r = |off: u64| unsafe { *((up + off) as *const u64) };
+    match xt {
+        x if x == r(crate::USER_WF66_VOC_FFETCH) => Some(FpMemOp::FFetch),
+        x if x == r(crate::USER_WF66_VOC_FSTORE) => Some(FpMemOp::FStore),
+        _ => None,
+    }
+}
+
 fn wf66_ctl_of(up: u64, xt: u64) -> Option<crate::wf66::Ctl> {
     use crate::wf66::Ctl;
     let r = |off: u64| unsafe { *((up + off) as *const u64) };
@@ -1058,6 +1092,26 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
             }
             b.lit(k);
             b.inline(f);
+        } else if let Some(fp) = wf66_fpop_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> Fp{fp:?}");
+            }
+            b.fp_bin(fp);
+        } else if xt == unsafe { *((up + crate::USER_WF66_VOC_FNEG) as *const u64) } {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> FpNeg");
+            }
+            b.fp_neg();
+        } else if let Some(fs) = wf66_fpstack_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> Fp{fs:?}");
+            }
+            b.fp_stack(fs);
+        } else if let Some(fm) = wf66_fpmem_of(up, xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> Fp{fm:?}");
+            }
+            b.fp_mem(fm);
         } else if let Some(toks) = WF66_INLINE.with(|m| m.borrow().get(&xt).cloned()) {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> INLINE {} tokens", toks.len());

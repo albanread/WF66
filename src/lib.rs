@@ -850,6 +850,18 @@ pub(crate) const USER_WF66_VOC_ULT: u64 = 0x1B58; // u<   (u_less)
 pub(crate) const USER_WF66_VOC_UGT: u64 = 0x1B60; // u>   (u_greater)
 pub(crate) const USER_WF66_VOC_PICK: u64 = 0x1B68; // pick (constant index only)
 pub(crate) const USER_WF66_VOC_EXIT: u64 = 0x1B70; // exit (-> ret)
+// Floating point (F0b): FTOS in xmm15, FP stack in memory at [UP+user_FSP].
+pub(crate) const USER_WF66_VOC_FADD:   u64 = 0x1B78; // f+    (f_plus)
+pub(crate) const USER_WF66_VOC_FSUB:   u64 = 0x1B80; // f-    (f_minus)
+pub(crate) const USER_WF66_VOC_FMUL:   u64 = 0x1B88; // f*    (f_times)
+pub(crate) const USER_WF66_VOC_FDIV:   u64 = 0x1B90; // f/    (f_slash)
+pub(crate) const USER_WF66_VOC_FNEG:   u64 = 0x1B98; // fnegate (f_negate)
+pub(crate) const USER_WF66_VOC_FDUP:   u64 = 0x1BA0; // fdup  (fdup)
+pub(crate) const USER_WF66_VOC_FDROP:  u64 = 0x1BA8; // fdrop (fdrop)
+pub(crate) const USER_WF66_VOC_FSWAP:  u64 = 0x1BB0; // fswap (fswap)
+pub(crate) const USER_WF66_VOC_FOVER:  u64 = 0x1BB8; // fover (fover)
+pub(crate) const USER_WF66_VOC_FFETCH: u64 = 0x1BC0; // f@    (f_fetch)
+pub(crate) const USER_WF66_VOC_FSTORE: u64 = 0x1BC8; // f!    (f_store)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -1909,6 +1921,29 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_PICK, wf66_pick);
         let wf66_exit = session.jit.lookup_addr("exit_word").context("wf66 vocab exit_word")?;
         session.write_user_u64(USER_WF66_VOC_EXIT, wf66_exit);
+        // Floating point (F0b): f+ f- f* f/ fnegate fdup fdrop fswap fover f@ f!.
+        let wf66_fadd = session.jit.lookup_addr("f_plus").context("wf66 vocab f_plus")?;
+        let wf66_fsub = session.jit.lookup_addr("f_minus").context("wf66 vocab f_minus")?;
+        let wf66_fmul = session.jit.lookup_addr("f_times").context("wf66 vocab f_times")?;
+        let wf66_fdiv = session.jit.lookup_addr("f_slash").context("wf66 vocab f_slash")?;
+        let wf66_fneg = session.jit.lookup_addr("f_negate").context("wf66 vocab f_negate")?;
+        let wf66_fdup = session.jit.lookup_addr("fdup").context("wf66 vocab fdup")?;
+        let wf66_fdrop = session.jit.lookup_addr("fdrop").context("wf66 vocab fdrop")?;
+        let wf66_fswap = session.jit.lookup_addr("fswap").context("wf66 vocab fswap")?;
+        let wf66_fover = session.jit.lookup_addr("fover").context("wf66 vocab fover")?;
+        let wf66_ffetch = session.jit.lookup_addr("f_fetch").context("wf66 vocab f_fetch")?;
+        let wf66_fstore = session.jit.lookup_addr("f_store").context("wf66 vocab f_store")?;
+        session.write_user_u64(USER_WF66_VOC_FADD, wf66_fadd);
+        session.write_user_u64(USER_WF66_VOC_FSUB, wf66_fsub);
+        session.write_user_u64(USER_WF66_VOC_FMUL, wf66_fmul);
+        session.write_user_u64(USER_WF66_VOC_FDIV, wf66_fdiv);
+        session.write_user_u64(USER_WF66_VOC_FNEG, wf66_fneg);
+        session.write_user_u64(USER_WF66_VOC_FDUP, wf66_fdup);
+        session.write_user_u64(USER_WF66_VOC_FDROP, wf66_fdrop);
+        session.write_user_u64(USER_WF66_VOC_FSWAP, wf66_fswap);
+        session.write_user_u64(USER_WF66_VOC_FOVER, wf66_fover);
+        session.write_user_u64(USER_WF66_VOC_FFETCH, wf66_ffetch);
+        session.write_user_u64(USER_WF66_VOC_FSTORE, wf66_fstore);
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {
