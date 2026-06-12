@@ -1561,6 +1561,163 @@ impl std::fmt::Display for CompileError {
     }
 }
 
+// ── Compile-time metrics (accumulated across every WF66 compile) ───────────
+//
+// The compiler keeps a running tally so a full test run reports min/max/avg per
+// word. Cheap (one mutex lock per definition) and always on; `reset_metrics`
+// before a measured run, `metrics()` after.
+
+/// min / max / average of one per-word quantity.
+#[derive(Clone, Copy, Debug)]
+pub struct Stat {
+    n: u64,
+    min: u32,
+    max: u32,
+    sum: u64,
+}
+
+impl Stat {
+    const fn new() -> Self {
+        Self {
+            n: 0,
+            min: u32::MAX,
+            max: 0,
+            sum: 0,
+        }
+    }
+    fn record(&mut self, v: u32) {
+        self.n += 1;
+        self.sum += v as u64;
+        if v < self.min {
+            self.min = v;
+        }
+        if v > self.max {
+            self.max = v;
+        }
+    }
+    pub fn count(&self) -> u64 {
+        self.n
+    }
+    pub fn min(&self) -> u32 {
+        if self.n == 0 {
+            0
+        } else {
+            self.min
+        }
+    }
+    pub fn max(&self) -> u32 {
+        self.max
+    }
+    pub fn avg(&self) -> f64 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.sum as f64 / self.n as f64
+        }
+    }
+}
+
+/// Per-word compile metrics, accumulated over a run.
+#[derive(Clone, Copy, Debug)]
+pub struct CompileMetrics {
+    /// Definitions WF66 optimized (fully deferrable).
+    pub deferrable: u64,
+    /// Definitions that fell back to the eager compiler (not deferrable).
+    pub non_deferrable: u64,
+    /// Of the deferrable words, how many used a read-only promotion register.
+    pub promoted: u64,
+    /// Input token count per word.
+    pub tokens: Stat,
+    /// Emitted instruction count per word (excludes directives/labels).
+    pub instrs: Stat,
+    /// Machine-code body size in bytes per word.
+    pub bytes: Stat,
+    /// Data-stack memory accesses (`[rbp]` loads/stores + Fop cell operands).
+    pub mem: Stat,
+    /// GP registers allocated per word beyond rax/TOS (the spare + promotion pool).
+    pub regs: Stat,
+}
+
+impl CompileMetrics {
+    const fn new() -> Self {
+        Self {
+            deferrable: 0,
+            non_deferrable: 0,
+            promoted: 0,
+            tokens: Stat::new(),
+            instrs: Stat::new(),
+            bytes: Stat::new(),
+            mem: Stat::new(),
+            regs: Stat::new(),
+        }
+    }
+    /// Fraction of definitions WF66 optimized (vs eager fallback).
+    pub fn coverage(&self) -> f64 {
+        let total = self.deferrable + self.non_deferrable;
+        if total == 0 {
+            0.0
+        } else {
+            self.deferrable as f64 / total as f64
+        }
+    }
+}
+
+static METRICS: std::sync::Mutex<CompileMetrics> = std::sync::Mutex::new(CompileMetrics::new());
+
+/// Snapshot the accumulated per-word compile metrics.
+pub fn metrics() -> CompileMetrics {
+    METRICS.lock().map(|m| *m).unwrap_or(CompileMetrics::new())
+}
+
+/// Reset the accumulated metrics (call before a measured run).
+pub fn reset_metrics() {
+    if let Ok(mut m) = METRICS.lock() {
+        *m = CompileMetrics::new();
+    }
+}
+
+/// True if `r` appears as a whole register token in `asm`.
+fn reg_present(asm: &str, r: &str) -> bool {
+    asm.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| tok == r)
+}
+
+fn record_metrics(tokens: usize, instrs: &[Instr], asm: &str, byte_len: usize) {
+    const SPARE: [&str; 8] = ["rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
+    let regs = SPARE.iter().filter(|r| reg_present(asm, r)).count() as u32;
+    let promoted = reg_present(asm, "r10") || reg_present(asm, "r11");
+    let instr_n = instrs
+        .iter()
+        .filter(|i| match i {
+            Instr::Raw(l) => {
+                let t = l.trim_start();
+                !t.starts_with('.') && !t.ends_with(':')
+            }
+            _ => true,
+        })
+        .count() as u32;
+    let mem = instrs
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Instr::LoadCell { .. } | Instr::StoreCell { .. } | Instr::CellAlu { .. }
+            )
+        })
+        .count() as u32;
+    if let Ok(mut m) = METRICS.lock() {
+        m.deferrable += 1;
+        if promoted {
+            m.promoted += 1;
+        }
+        m.tokens.record(tokens as u32);
+        m.instrs.record(instr_n);
+        m.bytes.record(byte_len as u32);
+        m.mem.record(mem);
+        m.regs.record(regs);
+    }
+}
+
 /// The finalizer core: fold + lower + assemble a closed, deferrable definition to
 /// **position-independent machine-code bytes** (the body, including the trailing
 /// `ret`). The wired `;` rewinds HERE to the body start and copies these bytes
@@ -1572,19 +1729,25 @@ impl std::fmt::Display for CompileError {
 /// references — so they run correctly wherever they are copied.
 pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
     if !is_deferrable(tokens) {
+        if let Ok(mut m) = METRICS.lock() {
+            m.non_deferrable += 1;
+        }
         return Err(CompileError::NotDeferrable);
     }
     let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
     // Deferred assembly: lex to instruction records, reduce, re-render.
     // coalesce rbp adjusts (absolute disps) -> fuse each window to its minimal
     // parallel-move (auto-pick) -> promote read-only hot cells to registers.
-    let asm = render(&promote_hot_cells(window_fuse(coalesce_dsp(parse_instrs(&asm)))));
+    let instrs = promote_hot_cells(window_fuse(coalesce_dsp(parse_instrs(&asm))));
+    let asm = render(&instrs);
     let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
     let fn_off = *module
         .symbols
         .get("wf66_body")
         .ok_or(CompileError::MissingSymbol)?;
-    Ok(module.code[fn_off..].to_vec())
+    let bytes = module.code[fn_off..].to_vec();
+    record_metrics(tokens.len(), &instrs, &asm, bytes.len());
+    Ok(bytes)
 }
 
 #[cfg(test)]

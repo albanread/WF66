@@ -1775,6 +1775,47 @@ fn m7_ans_core_tests_pass_with_wf66() {
 }
 
 #[test]
+#[ignore = "diagnostic: cargo test --test harness -- --ignored --nocapture wf66_compile_metrics"]
+fn wf66_compile_metrics() {
+    // Compile the real Forth corpus (core.f + tester + the ANS suite) with WF66
+    // enabled and report the per-word metrics the compiler accumulated. This is
+    // the "over the full test run" view: hundreds of real definitions, a mix of
+    // deferrable (WF66-optimized) and eager-fallback words.
+    let mut s = sess();
+    s.set_wf66_enabled(true);
+    wf64::wf66::reset_metrics();
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    s.load_source_file(&manifest.join("lib").join("core.f")).unwrap();
+    s.load_source_file(&manifest.join("lib").join("tester.fs")).unwrap();
+    s.load_source_file(&manifest.join("lib").join("ans_core_tests.fs"))
+        .unwrap();
+    let _ = s.eval("bye\n");
+
+    let m = wf64::wf66::metrics();
+    eprintln!("\n  === WF66 compile metrics (core.f + tester + ANS suite) ===");
+    eprintln!(
+        "  definitions:  {} WF66-optimized + {} eager-fallback   ({:.0}% coverage)",
+        m.deferrable,
+        m.non_deferrable,
+        m.coverage() * 100.0
+    );
+    eprintln!(
+        "  promoted:     {} words used a read-only promotion reg (r10/r11)",
+        m.promoted
+    );
+    eprintln!("  per WF66-optimized word        min   max     avg");
+    let row = |name: &str, st: wf64::wf66::Stat| {
+        eprintln!("    {name:<22} {:>4}  {:>4}  {:>7.2}", st.min(), st.max(), st.avg());
+    };
+    row("tokens in", m.tokens);
+    row("instructions out", m.instrs);
+    row("body bytes", m.bytes);
+    row("data-stack accesses", m.mem);
+    row("registers (excl rax)", m.regs);
+    eprintln!();
+}
+
+#[test]
 fn load_source_file_provides_defer_defining_word() {
     let mut s = sess();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join("core.f");
