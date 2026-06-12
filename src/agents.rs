@@ -270,6 +270,12 @@ pub extern "C" fn rt_sched_ready_len() -> u64 {
     READY.with(|r| r.borrow().len() as u64)
 }
 
+/// Number of runnable agents on this thread (for the IDE pump: slice when > 0,
+/// otherwise block on the event mailbox as before).
+pub fn ready_count() -> u64 {
+    rt_sched_ready_len()
+}
+
 /// `(send) ( msg aid -- )` — enqueue a message to an agent's mailbox and make it
 /// runnable. (Win64 args: rcx=msg, rdx=aid — see the kernel primitive.)
 #[no_mangle]
