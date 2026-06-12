@@ -539,6 +539,12 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("(switch-to)",    "agent_switch_word",       0),
     ("(agent-done?)",  "agent_done_q_word",       0),
     ("(agent-self)",   "agent_self_word",         0),
+    ("(ready-push)",   "sched_ready_push_word",   0),
+    ("(ready-pop)",    "sched_ready_pop_word",    0),
+    ("(ready-count)",  "sched_ready_len_word",    0),
+    ("(post)",         "mailbox_send_word",       0),
+    ("(mailbox-len)",  "mailbox_len_word",        0),
+    ("(mailbox-pop)",  "mailbox_pop_word",        0),
     ("(inline,)",      "inline_comma_word",       0),
     ("(inline-var,)",  "inline_var_comp",         0),
     // Parse & dict
@@ -1479,6 +1485,12 @@ impl Wf64Session {
                 "rt_agent_done"     => Some(crate::agents::rt_agent_done    as *mut c_void),
                 "rt_agent_is_done"  => Some(crate::agents::rt_agent_is_done as *mut c_void),
                 "rt_agent_self"     => Some(crate::agents::rt_agent_self    as *mut c_void),
+                "rt_sched_ready_push" => Some(crate::agents::rt_sched_ready_push as *mut c_void),
+                "rt_sched_ready_pop"  => Some(crate::agents::rt_sched_ready_pop  as *mut c_void),
+                "rt_sched_ready_len"  => Some(crate::agents::rt_sched_ready_len  as *mut c_void),
+                "rt_mailbox_send"   => Some(crate::agents::rt_mailbox_send   as *mut c_void),
+                "rt_mailbox_len"    => Some(crate::agents::rt_mailbox_len    as *mut c_void),
+                "rt_mailbox_pop"    => Some(crate::agents::rt_mailbox_pop    as *mut c_void),
                 "rt_ir_open_locals" => Some(runtime::rt_ir_open_locals as *mut c_void),
                 "rt_pin_analyze" => Some(runtime::rt_pin_analyze  as *mut c_void),
                 "rt_pin_rewrite" => Some(runtime::rt_pin_rewrite  as *mut c_void),
@@ -1752,6 +1764,14 @@ impl Wf64Session {
         if oop_path.exists() {
             session.load_source_file(&oop_path)
                 .with_context(|| format!("boot: load {}", oop_path.display()))?;
+        }
+        // Cooperative agent scheduler (lib/agents.f) — defines spawn/pause/
+        // receive/run-slice on top of the kernel agent primitives. (agent-init)
+        // is called by the host on the scheduler thread, not here.
+        let agents_path = core_path.with_file_name("agents.f");
+        if agents_path.exists() {
+            session.load_source_file(&agents_path)
+                .with_context(|| format!("boot: load {}", agents_path.display()))?;
         }
         if boot_timing {
             let t_oop = std::time::Instant::now();

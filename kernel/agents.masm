@@ -73,3 +73,57 @@ proc(agent_self_word)
     sub     rbp, cell
     next()
 endp()
+
+; ── Scheduler ready queue + mailboxes (Rust-backed; see src/agents.rs) ──────
+
+; (ready-push)  ( aid -- )   mark an agent runnable (dedup)
+proc(sched_ready_push_word)
+    mov     rcx, rax                        ; arg = aid
+    win64_call(rt_sched_ready_push)
+    mov     rax, [rbp]                      ; drop aid: raise NOS
+    add     rbp, cell
+    next()
+endp()
+
+; (ready-pop)  ( -- aid )    next runnable agent, or -1 if none
+proc(sched_ready_pop_word)
+    mov     [rbp - cell], rax               ; spill old TOS
+    win64_call(rt_sched_ready_pop)          ; rax = aid (or -1)
+    sub     rbp, cell
+    next()
+endp()
+
+; (ready-count)  ( -- n )
+proc(sched_ready_len_word)
+    mov     [rbp - cell], rax
+    win64_call(rt_sched_ready_len)
+    sub     rbp, cell
+    next()
+endp()
+
+; (post)  ( msg aid -- )     enqueue msg to aid's mailbox, make it runnable
+;     (Named (post), not (send): (send) is OOP's object-message dispatch.)
+proc(mailbox_send_word)
+    mov     rdx, rax                        ; arg2 = aid (TOS)
+    mov     rcx, [rbp]                      ; arg1 = msg (NOS)
+    win64_call(rt_mailbox_send)
+    mov     rax, [rbp + cell]               ; new TOS = NNOS
+    stk(2, 0)                               ; drop msg + aid
+    next()
+endp()
+
+; (mailbox-len)  ( -- n )    pending messages for the running agent
+proc(mailbox_len_word)
+    mov     [rbp - cell], rax
+    win64_call(rt_mailbox_len)
+    sub     rbp, cell
+    next()
+endp()
+
+; (mailbox-pop)  ( -- msg )  dequeue the running agent's next message (-1 empty)
+proc(mailbox_pop_word)
+    mov     [rbp - cell], rax
+    win64_call(rt_mailbox_pop)
+    sub     rbp, cell
+    next()
+endp()

@@ -15,6 +15,7 @@
 //! frames, and FSP/HANDLER swapping are layered on after this is solid.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -22,6 +23,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
 /// The single user-area base (UP); one shared user area across all agents.
 static USER_BASE: AtomicU64 = AtomicU64::new(0);
+
+// User-area cells that are per-agent execution state but live in the one shared
+// user area, so the switch swaps their VALUES (mirror kernel/macros.masm).
+const USER_HANDLER: u64 = 0x80; // catch/throw handler chain head
+const USER_FSP: u64 = 0x1218; // FP stack pointer
+
+#[inline]
+unsafe fn rd_cell(off: u64) -> u64 {
+    *((USER_BASE.load(Ordering::SeqCst) + off) as *const u64)
+}
+#[inline]
+unsafe fn wr_cell(off: u64, v: u64) {
+    *((USER_BASE.load(Ordering::SeqCst) + off) as *mut u64) = v;
+}
 
 /// Set at boot once the kernel is assembled (any thread; read-only after).
 pub fn set_globals(trampoline: u64, user_base: u64) {
@@ -36,6 +51,16 @@ struct Slot {
     /// Boxed so its address is stable; kept alive for the fiber's lifetime.
     _ctx: Box<[u64; 4]>,
     done: bool,
+    /// Saved FP stack pointer (`user_FSP`) — per-agent, swapped at each switch so
+    /// every agent has its own FP stack. Init to the FP region top.
+    fsp: u64,
+    /// Saved catch/throw handler chain head (`user_HANDLER`) — per-agent so an
+    /// agent's `catch` is isolated. Init 0 (no handler).
+    handler: u64,
+    /// This agent's incoming message queue (the mailbox).
+    mailbox: VecDeque<u64>,
+    /// True while the agent is in the ready queue (dedup guard).
+    ready: bool,
     /// Backing storage for the agent's Forth stacks (kept alive; grows downward
     /// from the *_top addresses baked into `_ctx`). Empty for the operator.
     _ds: Vec<u64>,
@@ -47,6 +72,8 @@ thread_local! {
     static OPERATOR: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
     static AGENTS: RefCell<Vec<Slot>> = const { RefCell::new(Vec::new()) };
     static CURRENT: Cell<usize> = const { Cell::new(0) };
+    /// Round-robin ready queue of runnable agent ids (the scheduler's run set).
+    static READY: RefCell<VecDeque<usize>> = const { RefCell::new(VecDeque::new()) };
 }
 
 // Per-agent Forth stack sizes (u64 cells).
@@ -111,11 +138,16 @@ pub extern "C" fn rt_agent_init() -> u64 {
             fiber: op,
             _ctx: Box::new([0; 4]),
             done: false,
+            fsp: 0, // operator's live FSP/HANDLER are saved on the first switch-away
+            handler: 0,
+            mailbox: VecDeque::new(),
+            ready: false,
             _ds: Vec::new(),
             _ls: Vec::new(),
             _fp: Vec::new(),
         });
     });
+    READY.with(|r| r.borrow_mut().clear());
     CURRENT.with(|c| c.set(0));
     0
 }
@@ -130,7 +162,7 @@ pub extern "C" fn rt_agent_spawn(entry_xt: u64) -> u64 {
     let mut fp = vec![0u64; FP_CELLS];
     let ds_top = ds.as_mut_ptr() as u64 + (DS_CELLS * 8) as u64;
     let ls_top = ls.as_mut_ptr() as u64 + (LS_CELLS * 8) as u64;
-    let _fp_top = fp.as_mut_ptr() as u64 + (FP_CELLS * 8) as u64;
+    let fp_top = fp.as_mut_ptr() as u64 + (FP_CELLS * 8) as u64;
     let ctx: Box<[u64; 4]> = Box::new([up, ds_top, ls_top, entry_xt]);
     let ctx_ptr = ctx.as_ptr() as *const c_void;
     let fiber = sys::create_fiber(FIBER_STACK, tramp, ctx_ptr);
@@ -141,6 +173,10 @@ pub extern "C" fn rt_agent_spawn(entry_xt: u64) -> u64 {
             fiber,
             _ctx: ctx,
             done: false,
+            fsp: fp_top, // own FP stack (top; grows down)
+            handler: 0,  // no catch handler installed yet
+            mailbox: VecDeque::new(),
+            ready: false,
             _ds: ds,
             _ls: ls,
             _fp: fp,
@@ -166,9 +202,106 @@ pub extern "C" fn rt_agent_switch(target: u64) -> u64 {
     if fiber.is_null() {
         return 0; // unknown or finished agent: stay put
     }
+    // Swap the per-agent user-area cells (FSP, HANDLER): save the outgoing agent's
+    // live values, install the target's. RBP/R15/XMM15/RBX are non-volatile, so
+    // the fiber switch preserves them; only these memory cells are shared.
+    let cur = CURRENT.with(|c| c.get());
+    let (fsp, handler) = unsafe { (rd_cell(USER_FSP), rd_cell(USER_HANDLER)) };
+    let (tfsp, thandler) = AGENTS.with(|a| {
+        let mut a = a.borrow_mut();
+        if let Some(s) = a.get_mut(cur) {
+            s.fsp = fsp;
+            s.handler = handler;
+        }
+        let s = &a[t];
+        (s.fsp, s.handler)
+    });
+    unsafe {
+        wr_cell(USER_FSP, tfsp);
+        wr_cell(USER_HANDLER, thandler);
+    }
     CURRENT.with(|c| c.set(t));
     sys::switch_to(fiber);
     0
+}
+
+// ── Scheduler ready queue + mailboxes ──────────────────────────────────────
+
+/// `(ready-push) ( aid -- )` — mark an agent runnable (dedup; no-op if queued).
+#[no_mangle]
+pub extern "C" fn rt_sched_ready_push(aid: u64) -> u64 {
+    let t = aid as usize;
+    let push = AGENTS.with(|a| {
+        let mut a = a.borrow_mut();
+        match a.get_mut(t) {
+            Some(s) if !s.ready && !s.done => {
+                s.ready = true;
+                true
+            }
+            _ => false,
+        }
+    });
+    if push {
+        READY.with(|r| r.borrow_mut().push_back(t));
+    }
+    0
+}
+
+/// `(ready-pop) ( -- aid )` — next runnable agent, or -1 if none.
+#[no_mangle]
+pub extern "C" fn rt_sched_ready_pop() -> u64 {
+    let id = READY.with(|r| r.borrow_mut().pop_front());
+    match id {
+        Some(t) => {
+            AGENTS.with(|a| {
+                if let Some(s) = a.borrow_mut().get_mut(t) {
+                    s.ready = false;
+                }
+            });
+            t as u64
+        }
+        None => u64::MAX,
+    }
+}
+
+/// `(ready-count) ( -- n )` — number of runnable agents queued right now.
+#[no_mangle]
+pub extern "C" fn rt_sched_ready_len() -> u64 {
+    READY.with(|r| r.borrow().len() as u64)
+}
+
+/// `(send) ( msg aid -- )` — enqueue a message to an agent's mailbox and make it
+/// runnable. (Win64 args: rcx=msg, rdx=aid — see the kernel primitive.)
+#[no_mangle]
+pub extern "C" fn rt_mailbox_send(msg: u64, aid: u64) -> u64 {
+    let t = aid as usize;
+    AGENTS.with(|a| {
+        if let Some(s) = a.borrow_mut().get_mut(t) {
+            s.mailbox.push_back(msg);
+        }
+    });
+    rt_sched_ready_push(aid);
+    0
+}
+
+/// `(mailbox-len) ( -- n )` — number of pending messages for the running agent.
+#[no_mangle]
+pub extern "C" fn rt_mailbox_len() -> u64 {
+    let cur = CURRENT.with(|c| c.get());
+    AGENTS.with(|a| a.borrow().get(cur).map_or(0, |s| s.mailbox.len() as u64))
+}
+
+/// `(mailbox-pop) ( -- msg )` — dequeue the running agent's next message, or -1
+/// if the mailbox is empty (callers normally check `(mailbox-len)` first).
+#[no_mangle]
+pub extern "C" fn rt_mailbox_pop() -> u64 {
+    let cur = CURRENT.with(|c| c.get());
+    AGENTS.with(|a| {
+        a.borrow_mut()
+            .get_mut(cur)
+            .and_then(|s| s.mailbox.pop_front())
+            .unwrap_or(u64::MAX)
+    })
 }
 
 /// Called by the trampoline when an agent's entry word returns: mark it done and
@@ -176,11 +309,21 @@ pub extern "C" fn rt_agent_switch(target: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn rt_agent_done() -> u64 {
     let cur = CURRENT.with(|c| c.get());
-    AGENTS.with(|a| {
-        if let Some(s) = a.borrow_mut().get_mut(cur) {
+    // Mark done and restore the OPERATOR's per-agent cells (FSP/HANDLER) before
+    // switching to it — unlike rt_agent_switch, this path doesn't go through the
+    // swap, so without this the operator would inherit the dead agent's FP stack.
+    let (ofsp, ohandler) = AGENTS.with(|a| {
+        let mut a = a.borrow_mut();
+        if let Some(s) = a.get_mut(cur) {
             s.done = true;
         }
+        let op = &a[0];
+        (op.fsp, op.handler)
     });
+    unsafe {
+        wr_cell(USER_FSP, ofsp);
+        wr_cell(USER_HANDLER, ohandler);
+    }
     let op = OPERATOR.with(|c| c.get());
     CURRENT.with(|c| c.set(0));
     sys::switch_to(op);

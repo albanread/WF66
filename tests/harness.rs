@@ -7537,3 +7537,27 @@ bye\n";
     let letters: String = out.chars().filter(|c| *c == 'A' || *c == 'B').collect();
     assert_eq!(letters, "ABABAB", "expected interleave; got out={out:?}");
 }
+
+#[test]
+fn agents_fp_and_mailbox() {
+    // Step 2 proof: an FP agent carries FP-stack state across pauses (per-agent
+    // FSP swap), and a second agent blocks on `receive` until the operator
+    // `(post)`s it a message — all driven by run-slice. (`(post)`, not `(send)`:
+    // `(send)` is OOP's object-message dispatch.)
+    let prog = "\
+(agent-init) drop\n\
+fvariable fres   variable mres\n\
+: fp-task  2e pause  3e pause  f*  fres f! ;\n\
+: rx-task  receive  mres ! ;\n\
+' fp-task agent value fa\n\
+' rx-task agent value rb\n\
+run-until-idle\n\
+42 rb (post)\n\
+run-until-idle\n\
+fres f@ f.   mres @ .\n\
+bye\n";
+    let mut s = sess();
+    let out = s.eval(prog).unwrap();
+    assert!(out.contains("6.0"), "FP across pauses failed; out={out:?}");
+    assert!(out.contains("42"), "mailbox receive failed; out={out:?}");
+}

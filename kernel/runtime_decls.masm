@@ -48,6 +48,12 @@
 @extern rt_agent_done(0)        ; ( -- ) trampoline: mark current done, to operator
 @extern rt_agent_is_done(1)     ; (aid -- flag) -1 if finished/unknown
 @extern rt_agent_self(0)        ; ( -- aid ) running agent's id
+@extern rt_sched_ready_push(1)  ; (aid -- ) mark agent runnable
+@extern rt_sched_ready_pop(0)   ; ( -- aid ) next runnable agent or -1
+@extern rt_sched_ready_len(0)   ; ( -- n ) runnable count
+@extern rt_mailbox_send(2)      ; (msg, aid) enqueue + make runnable
+@extern rt_mailbox_len(0)       ; ( -- n ) running agent's pending messages
+@extern rt_mailbox_pop(0)       ; ( -- msg ) dequeue running agent's message (-1)
 @extern rt_ir_open_locals(3)    ; (UP, n_total, n_init) WF66: record the `{:` prologue
 @extern rt_slurp_file(2)        ; read file at (addr,len) into Rust Vec, return content ptr or 0
 @extern rt_slurp_len(0)         ; return byte length of top slurped file
