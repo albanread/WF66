@@ -1970,6 +1970,38 @@ fn wf66_fp_math_word_is_optimized() {
 }
 
 #[test]
+#[ignore = "benchmark: cargo test --test harness -- --ignored --nocapture wf66_fp_inner_bench"]
+fn wf66_fp_inner_bench() {
+    // A fully-deferrable pure-Forth FP inner loop (no fvariables / FP literals /
+    // frot, which still taint): a chain of consecutive FP ops on the FP TOS,
+    // inlined and FSP-coalesced. Optimizer off vs on.
+    let setup = "\
+: fk  fdup f*  fdup f*  fdup f+ ;\n\
+: floop  begin fk 1- dup 0= until drop ;\n";
+    fn run_bench(wf66: bool, setup: &str, n: u64) -> u128 {
+        let mut s = sess();
+        if wf66 {
+            s.set_wf66_enabled(true);
+        }
+        s.eval(setup).unwrap();
+        s.eval("1.0e 500000 floop fdrop\n").unwrap(); // warmup
+        let prog = format!("1.0e {n} floop fdrop\n");
+        let t = std::time::Instant::now();
+        s.eval(&prog).unwrap();
+        t.elapsed().as_micros()
+    }
+    let n = 5_000_000;
+    let off = run_bench(false, setup, n);
+    let on = run_bench(true, setup, n);
+    eprintln!("\n  FP inner loop (pure Forth, fk = fdup f* fdup f* fdup f+), {n} iters:");
+    eprintln!("    optimizer OFF: {off:>8} us");
+    eprintln!(
+        "    optimizer ON : {on:>8} us   ({:.2}x faster)",
+        off as f64 / on as f64
+    );
+}
+
+#[test]
 fn load_source_file_provides_defer_defining_word() {
     let mut s = sess();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join("core.f");
