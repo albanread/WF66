@@ -194,19 +194,66 @@ fn run_drain_loop(mut session: wf64::Wf64Session) {
     use wf64::igui::channels::{self, IGuiEvent};
     use wf64::igui::fconsole;
 
+    // Cooperative-agent pump — GATED behind WF66_AGENTS (default OFF). When off,
+    // agents_on=false: the worker never converts to a fiber, never run-slices, and
+    // always blocks on next_event(200) — i.e. exactly the proven classic loop.
+    // When WF66_AGENTS is set, the worker becomes the operator fiber and advances
+    // agents with a RUST-side run_slice (operator stays on its native stack; only
+    // agents enter Forth). Experimental: the fiber<->forth_main/SEH interaction
+    // still needs GUI debugging, hence the gate.
+    let agents_on = std::env::var_os("WF66_AGENTS").is_some();
+    if agents_on {
+        let _ = session.eval("(agent-init) drop\n");
+    }
+
     loop {
+        let runnable = agents_on && wf64::agents::ready_count() > 0;
+        // Block (200ms) when idle; poll (0ms) when agents have work to do.
+        let timeout = if runnable { 0 } else { 200 };
         let twait = std::time::Instant::now();
-        let Some(ev) = channels::next_event(200) else {
-            continue;
-        };
-        wf64::igui::fconsole::trace(
-            "worker",
-            format_args!("recv after {}us", twait.elapsed().as_micros()),
-        );
+        if let Some(ev) = channels::next_event(timeout) {
+            wf64::igui::fconsole::trace(
+                "worker",
+                format_args!("recv after {}us", twait.elapsed().as_micros()),
+            );
+            // ForthRestart replaces the owned session, so it's handled here (not
+            // in handle_worker_event, which only borrows it).
+            if matches!(ev, IGuiEvent::ForthRestart) {
+                fconsole::reset_for_restart();
+                drop(session);
+                fconsole::append("∴ restart requested — fresh session below.");
+                fconsole::append("");
+                match boot_session(false) {
+                    Some(s) => session = s,
+                    None => return,
+                }
+                if agents_on {
+                    let _ = session.eval("(agent-init) drop\n"); // re-arm the operator fiber
+                }
+                wf64::igui::stack_view::publish(session.stack());
+            } else if !handle_worker_event(&mut session, ev) {
+                return; // FrameClose
+            }
+        }
+        if agents_on && wf64::agents::ready_count() > 0 {
+            // Advance every runnable agent one cooperative slice — Rust-side, so
+            // the operator never re-enters forth_main's return-stack reroute.
+            wf64::agents::run_slice();
+        }
+    }
+}
+
+/// Handle one IGuiEvent on the worker thread. Returns false on FrameClose (the
+/// drain loop should exit). Extracted from the loop so the agent pump can call it.
+#[cfg(windows)]
+fn handle_worker_event(session: &mut wf64::Wf64Session, ev: wf64::igui::channels::IGuiEvent) -> bool {
+    use wf64::igui::channels::IGuiEvent;
+    use wf64::igui::fconsole;
+    {
         match ev {
             IGuiEvent::EvalBuffer { source } => {
                 let teval = std::time::Instant::now();
-                handle_eval(&mut session, &source);
+                handle_eval(session, &source);
                 wf64::igui::fconsole::trace(
                     "worker",
                     format_args!("eval ({} bytes) took {}us",
@@ -223,21 +270,10 @@ fn run_drain_loop(mut session: wf64::Wf64Session) {
                     panic!("bug-rust-panic triggered from Forth — testing crash recovery");
                 }
             }
-            IGuiEvent::ForthRestart => {
-                fconsole::reset_for_restart();
-                drop(session);
-                fconsole::append("∴ restart requested — fresh session below.");
-                fconsole::append("");
-                match boot_session(false) {
-                    Some(s) => session = s,
-                    None => return,
-                }
-                wf64::igui::stack_view::publish(session.stack());
-            }
             IGuiEvent::ReplSubmit { child_id } => {
                 use wf64::igui::repl_pane::{self, AppendKind};
                 let Some(source) = repl_pane::pop_input(child_id) else {
-                    continue;
+                    return true;
                 };
                 match session.eval(&source) {
                     Ok(output) => {
@@ -274,11 +310,12 @@ fn run_drain_loop(mut session: wf64::Wf64Session) {
             }
             IGuiEvent::FrameClose => {
                 fconsole::append("∴ frame closing");
-                return;
+                return false;
             }
             _ => {}
         }
     }
+    true
 }
 
 /// Format a panic payload into a multi-line dump and push it

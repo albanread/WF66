@@ -80,7 +80,7 @@ thread_local! {
 const DS_CELLS: usize = 8 * 1024; // 64 KB data stack
 const LS_CELLS: usize = 8 * 1024; // 64 KB locals stack
 const FP_CELLS: usize = 4 * 1024; // 32 KB FP stack
-const FIBER_STACK: usize = 512 * 1024; // native return stack per fiber
+const FIBER_STACK: usize = 4 * 1024 * 1024; // native stack per fiber (deep Win32/D2D call chains)
 
 #[cfg(windows)]
 mod sys {
@@ -274,6 +274,24 @@ pub extern "C" fn rt_sched_ready_len() -> u64 {
 /// otherwise block on the event mailbox as before).
 pub fn ready_count() -> u64 {
     rt_sched_ready_len()
+}
+
+/// Run one cooperative slice from RUST (the gated IDE pump): switch to each
+/// currently-runnable agent once. Unlike the Forth `run-slice`, the operator
+/// stays on its native fiber stack (Rust code) and never enters `forth_main`'s
+/// return-stack reroute — which is what collided with the IDE's fiber/TEB state
+/// and crashed the worker. Only the agents run Forth, each on its own fiber.
+pub fn run_slice() {
+    let n = rt_sched_ready_len();
+    for _ in 0..n {
+        let aid = rt_sched_ready_pop();
+        if aid == u64::MAX {
+            break;
+        }
+        if rt_agent_is_done(aid) == 0 {
+            rt_agent_switch(aid);
+        }
+    }
 }
 
 /// `(send) ( msg aid -- )` — enqueue a message to an agent's mailbox and make it
