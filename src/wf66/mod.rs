@@ -964,6 +964,17 @@ enum Instr {
     /// `mov <dst>, <src>`: a register-to-register move (rbp-independent, so it
     /// neither moves the stack pointer nor bounds a window).
     RegMove { dst: String, src: String },
+    /// An arithmetic op with a data-stack cell operand — a Fop combining TOS with
+    /// `[rbp+disp]`. `cell_is_dest=false`: `<mnem> <reg>, [rbp+disp]` (reads the
+    /// cell, e.g. `add`/`imul`/`and`/`or`/`xor`). `cell_is_dest=true`:
+    /// `<mnem> [rbp+disp], <reg>` (reads *and* writes the cell, e.g. `sub`).
+    /// Carrying the disp lets coalesce hold rbp stable across arithmetic.
+    CellAlu {
+        mnem: String,
+        reg: String,
+        disp: i64,
+        cell_is_dest: bool,
+    },
     /// Any other emitted line, verbatim (without its trailing newline).
     Raw(String),
 }
@@ -1042,6 +1053,31 @@ fn parse_instrs(asm: &str) -> Vec<Instr> {
                     }
                 }
             }
+            // Arithmetic op against a data-stack cell (a Fop). `op reg,[rbp+d]`
+            // reads the cell; `op [rbp+d],reg` reads+writes it. (`add/sub rbp`
+            // and immediate forms were handled above / fall through to Raw.)
+            for mnem in ["add", "sub", "imul", "and", "or", "xor"] {
+                if let Some(rest) = t.strip_prefix(mnem).and_then(|r| r.strip_prefix(' ')) {
+                    if let Some((a, b)) = rest.split_once(", ") {
+                        if let Some(disp) = parse_rbp_mem(a) {
+                            return Instr::CellAlu {
+                                mnem: mnem.to_string(),
+                                reg: b.to_string(),
+                                disp,
+                                cell_is_dest: true,
+                            };
+                        }
+                        if let Some(disp) = parse_rbp_mem(b) {
+                            return Instr::CellAlu {
+                                mnem: mnem.to_string(),
+                                reg: a.to_string(),
+                                disp,
+                                cell_is_dest: false,
+                            };
+                        }
+                    }
+                }
+            }
             Instr::Raw(line.to_string())
         })
         .collect()
@@ -1062,6 +1098,18 @@ fn render(instrs: &[Instr]) -> String {
                 s.push_str(&format!("    mov {}, {src}\n", mem_rbp(*disp)))
             }
             Instr::RegMove { dst, src } => s.push_str(&format!("    mov {dst}, {src}\n")),
+            Instr::CellAlu {
+                mnem,
+                reg,
+                disp,
+                cell_is_dest,
+            } => {
+                if *cell_is_dest {
+                    s.push_str(&format!("    {mnem} {}, {reg}\n", mem_rbp(*disp)));
+                } else {
+                    s.push_str(&format!("    {mnem} {reg}, {}\n", mem_rbp(*disp)));
+                }
+            }
             Instr::Raw(l) => {
                 s.push_str(l);
                 s.push('\n');
@@ -1100,6 +1148,21 @@ fn coalesce_dsp(instrs: Vec<Instr>) -> Vec<Instr> {
                 src,
             }),
             Instr::RegMove { dst, src } => out.push(Instr::RegMove { dst, src }),
+            // A Fop reads (and maybe writes) a data-stack cell but leaves rbp
+            // alone — so it does NOT settle rbp; rewrite its cell disp by the
+            // running delta, exactly like a Load/Store. This keeps rbp stable
+            // across arithmetic so a whole basic block is one run.
+            Instr::CellAlu {
+                mnem,
+                reg,
+                disp,
+                cell_is_dest,
+            } => out.push(Instr::CellAlu {
+                mnem,
+                reg,
+                disp: disp + delta,
+                cell_is_dest,
+            }),
             Instr::Raw(l) => {
                 if delta != 0 {
                     out.push(Instr::AdjustDsp(delta));
@@ -1145,13 +1208,17 @@ fn window_fuse(instrs: Vec<Instr>) -> Vec<Instr> {
     let mut out: Vec<Instr> = Vec::with_capacity(instrs.len());
     let mut i = 0;
     while i < instrs.len() {
-        if matches!(instrs[i], Instr::Raw(_)) {
+        // CellAlu (a Fop) and Raw both bound a pure-movement window: a Fop
+        // computes (it isn't a value shuffle) so fusion can't model it; it passes
+        // through untouched. (It reads only rax + its cell, so it can't read a
+        // window's scratch reg — the live-out guard needn't see it.)
+        if matches!(instrs[i], Instr::Raw(_) | Instr::CellAlu { .. }) {
             out.push(instrs[i].clone());
             i += 1;
             continue;
         }
         let start = i;
-        while i < instrs.len() && !matches!(instrs[i], Instr::Raw(_)) {
+        while i < instrs.len() && !matches!(instrs[i], Instr::Raw(_) | Instr::CellAlu { .. }) {
             i += 1;
         }
         let window = &instrs[start..i];
@@ -1193,7 +1260,7 @@ fn fuse_window(window: &[Instr], follow: &str) -> Option<Vec<Instr>> {
                 }
                 moves.push(ins);
             }
-            Instr::Raw(_) => return None,
+            Instr::Raw(_) | Instr::CellAlu { .. } => return None,
         }
     }
     // 2. symbolic simulation -> net register/slot map
@@ -1221,7 +1288,7 @@ fn fuse_window(window: &[Instr], follow: &str) -> Option<Vec<Instr>> {
                     defined.push(dst.as_str());
                 }
             }
-            Instr::Raw(_) | Instr::AdjustDsp(_) => unreachable!(),
+            Instr::Raw(_) | Instr::AdjustDsp(_) | Instr::CellAlu { .. } => unreachable!(),
         }
     }
     // 3. live-out scratch guard: a scratch reg this window defines must not be
@@ -1542,6 +1609,10 @@ mod tests {
         let bodies: Vec<Vec<Token>> = vec![
             vec![Token::Lit(5), Token::Lit(7), Token::Inline(Fop::Add)],
             vec![Token::Lit(5), Token::Inline(Fop::Mul), Token::Lit(2), Token::Inline(Fop::Add)],
+            // Fop forms: Sub lowers to `sub [rbp], rax` (cell-dest CellAlu);
+            // And to `and rax, [rbp]` (cell-source). Exercise the round-trip.
+            vec![Token::Lit(10), Token::Lit(3), Token::Inline(Fop::Sub)],
+            vec![Token::Lit(12), Token::Lit(5), Token::Inline(Fop::And)],
             vec![Token::Stack(StackOp::Dup), Token::Inline(Fop::Mul)],
             vec![Token::Stack(StackOp::Rot)],
             vec![Token::Stack(StackOp::TwoSwap)],
