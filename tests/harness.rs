@@ -1992,14 +1992,33 @@ fvariable zr  fvariable zi  fvariable cre  fvariable cim\n\
         s.eval(&prog).unwrap();
         (t.elapsed().as_micros(), out)
     }
+    // Hand-rolled MASM kernel (fractal-iter): the whole escape loop in xmm
+    // registers. Interior point c=(-0.5,0), z0=0 -> runs the full maxiter iters.
+    fn run_masm(n: u64) -> u128 {
+        let mut s = sess();
+        s.eval("0e 0e -0.5e 0e 200000 fractal-iter drop\n").unwrap(); // warmup
+        let prog = format!("0e 0e -0.5e 0e {n} fractal-iter drop\n");
+        let t = std::time::Instant::now();
+        s.eval(&prog).unwrap();
+        t.elapsed().as_micros()
+    }
     let n = 5_000_000;
     let (off, _) = run_bench(false, setup, n);
     let (on, _) = run_bench(true, setup, n);
-    eprintln!("\n  Mandelbrot inner loop (pure Forth, z=z^2+c), {n} iters:");
-    eprintln!("    optimizer OFF: {off:>8} us");
+    let masm = run_masm(n);
+    eprintln!("\n  Mandelbrot inner loop, {n} iters (z = z^2 + c):");
+    eprintln!("    Forth, optimizer OFF: {off:>8} us");
     eprintln!(
-        "    optimizer ON : {on:>8} us   ({:.2}x faster)",
+        "    Forth, optimizer ON : {on:>8} us   ({:.2}x faster than off)",
         off as f64 / on as f64
+    );
+    eprintln!(
+        "    hand-rolled MASM     : {masm:>8} us   (regs across iters + escape test)",
+    );
+    eprintln!(
+        "    => optimized Forth is {:.2}x the MASM time (MASM {:.2}x faster)",
+        on as f64 / masm as f64,
+        on as f64 / masm as f64
     );
 }
 
