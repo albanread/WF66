@@ -1970,6 +1970,73 @@ fn wf66_fp_math_word_is_optimized() {
 }
 
 #[test]
+#[ignore = "benchmark: cargo test --test harness -- --ignored --nocapture wf66_mandel_inner_bench"]
+fn wf66_mandel_inner_bench() {
+    // Pure-Forth Mandelbrot inner loop z = z^2 + c, fixed iterations (escape test
+    // needs FP comparisons). With variable-reference-as-Lit, the fvariable refs
+    // no longer taint, so this WF66-compiles. Optimizer off vs on.
+    let setup = "\
+fvariable zr  fvariable zi  fvariable cre  fvariable cim\n\
+: iter  zr f@ fdup f*  zi f@ fdup f*  f-  cre f@ f+  zr f@ zi f@ f*  fdup f+  cim f@ f+  zi f!  zr f! ;\n\
+: brot  begin iter 1- dup 0= until drop ;\n\
+0.285e cre f!  0.01e cim f!\n";
+    fn run_bench(wf66: bool, setup: &str, n: u64) -> (u128, String) {
+        let mut s = sess();
+        if wf66 {
+            s.set_wf66_enabled(true);
+        }
+        let out = s.eval(setup).unwrap();
+        s.eval("0e zr f!  0e zi f!  200000 brot\n").unwrap(); // warmup
+        let prog = format!("0e zr f!  0e zi f!  {n} brot\n");
+        let t = std::time::Instant::now();
+        s.eval(&prog).unwrap();
+        (t.elapsed().as_micros(), out)
+    }
+    let n = 5_000_000;
+    let (off, _) = run_bench(false, setup, n);
+    let (on, _) = run_bench(true, setup, n);
+    eprintln!("\n  Mandelbrot inner loop (pure Forth, z=z^2+c), {n} iters:");
+    eprintln!("    optimizer OFF: {off:>8} us");
+    eprintln!(
+        "    optimizer ON : {on:>8} us   ({:.2}x faster)",
+        off as f64 / on as f64
+    );
+}
+
+#[test]
+fn wf66_variable_ref_is_deferrable() {
+    // A variable reference must compile as a literal address push (not taint),
+    // so a word using variables is WF66-optimized and still matches eager.
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    let src = "variable v\n: bump  v @ 1+ v ! ;\n";
+    let prog = format!("{src}0 v !  bump bump bump  v @ .\nbye\n");
+    let eager = {
+        let mut s = sess();
+        s.eval(&format!("{src}bye\n")).unwrap();
+        body(&s, "bump")
+    };
+    let (wf66, out) = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        let o = s.eval(&prog).unwrap();
+        (body(&s, "bump"), o)
+    };
+    let eout = {
+        let mut s = sess();
+        s.eval(&prog).unwrap()
+    };
+    assert_ne!(eager, wf66, "bump should be WF66-compiled (var refs are literals)");
+    assert_eq!(out, eout, "var-using word result must match eager");
+}
+
+#[test]
 #[ignore = "benchmark: cargo test --test harness -- --ignored --nocapture wf66_fp_inner_bench"]
 fn wf66_fp_inner_bench() {
     // A fully-deferrable pure-Forth FP inner loop (no fvariables / FP literals /

@@ -1145,6 +1145,11 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
                 eprintln!("[wf66] word xt={xt:#x} -> INLINE {} tokens", toks.len());
             }
             b.splice(&toks);
+        } else if let Some(pfa) = wf66_create_var_pfa(xt) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> Lit({pfa:#x}) (variable address)");
+            }
+            b.lit(pfa as i64);
         } else if WF66_CALL.lock().map(|v| v.contains(&xt)).unwrap_or(false)
             || WF66_CALL_USER.lock().map(|v| v.contains(&xt)).unwrap_or(false)
         {
@@ -1164,6 +1169,41 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
 
 fn wf66_dbg() -> bool {
     std::env::var_os("WF66_DEBUG").is_some()
+}
+
+/// If `xt` is a plain `create`/`variable`/`fvariable` word, return its data
+/// address (PFA) so the recorder can capture the reference as `Lit(pfa)` — a
+/// constant address push — instead of a call/taint.
+///
+/// `create_word` emits a fixed stub at xt that pushes the body address (which
+/// lives in the data region) with that address baked in as `mov rax, imm64`:
+///   48 89 45 F8        mov [rbp-8], rax
+///   48 B8 <imm64>      mov rax, <body-addr>   <- imm64 at xt+6 is the PFA
+///   48 83 ED 08        sub rbp, 8
+///   C3                 ret
+/// Matching this exact signature is self-validating; the `ret` tail (0xC3 at
+/// xt+18) excludes `does>` words (constant/value/...), whose tail is patched to
+/// a `jmp` to the does-body. Reads stay within xt's own code, so a non-create
+/// word never triggers a wild dereference (it just fails to match).
+fn wf66_create_var_pfa(xt: u64) -> Option<u64> {
+    if xt < 32 {
+        return None;
+    }
+    unsafe {
+        let b = |o: u64| *((xt + o) as *const u8);
+        if b(0) == 0x48
+            && b(1) == 0x89
+            && b(2) == 0x45
+            && b(3) == 0xF8
+            && b(4) == 0x48
+            && b(5) == 0xB8
+            && b(18) == 0xC3
+        {
+            Some(std::ptr::read_unaligned((xt + 6) as *const u64))
+        } else {
+            None
+        }
+    }
 }
 
 /// Mark the span non-deferrable: an immediate word ran during compile and its
