@@ -526,11 +526,16 @@ pub enum Token {
     /// store — no data-stack traffic for the address.
     FpStoreAbs(u64),
     /// Allocate a locals frame of `n` cells on the locals stack (`sub r15, n*8`).
-    /// Lowering also emits the matching teardown (`add r15, n*8`) before `ret`,
-    /// because WF66's rewrite replaces the kernel's `;` frame-finishing. A local
-    /// is a private 64-bit cell at `[r15+offset]` — no aliasing is possible, so
-    /// these are the ideal register-promotion targets (a later pass).
+    /// A local is a private 64-bit cell at `[r15+offset]` — no aliasing possible,
+    /// so these are the ideal register-promotion targets (a later pass).
     OpenLocals(u32),
+    /// Free a locals frame of `n` cells (`add r15, n*8`). EXPLICITLY paired with
+    /// its `OpenLocals` so a locals word inlined into another splices as a
+    /// balanced unit — `[OpenLocals … CloseLocals]` — producing a correct NESTED
+    /// frame at the call site (R15 dips and pops; offsets stay relative to each
+    /// word's own sub-frame). `rt_ir_finalize` appends this from the locals count,
+    /// since WF66's rewrite replaces the kernel `;`/EXIT frame-finishing.
+    CloseLocals(u32),
     /// Push a local cell onto the data stack (`local`): `[r15+offset]` -> TOS.
     /// Verbatim mirror of `check_local_emit_word`'s inline fetch.
     LocalFetch(i32),
@@ -835,9 +840,6 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     // unique labels within this body.
     let mut ctl: Vec<CtlFrame> = Vec::new();
     let mut ctl_id: u32 = 0;
-    // Locals frame size (cells); the teardown is emitted before every `ret`,
-    // since WF66's rewrite replaces the kernel `;`/EXIT frame-finishing.
-    let mut frame_cells: u32 = 0;
 
     for &t in tokens {
         match t {
@@ -896,8 +898,10 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             }
             // ── locals (private 64-bit cells at [r15+offset]; r15 = LP) ──────
             Token::OpenLocals(n) => {
-                frame_cells = n; // teardown emitted before ret (WF66 replaces `;`)
                 s.push_str(&format!("    sub r15, {}\n", n as i64 * CELL));
+            }
+            Token::CloseLocals(n) => {
+                s.push_str(&format!("    add r15, {}\n", n as i64 * CELL));
             }
             Token::LocalFetch(off) => {
                 // mirror check_local_emit_word: push [r15+off] onto the data stack.
@@ -927,9 +931,6 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
 
     if !ctl.is_empty() {
         return Err(LowerError::UnbalancedControl); // unclosed IF
-    }
-    if frame_cells > 0 {
-        s.push_str(&format!("    add r15, {}\n", frame_cells as i64 * CELL));
     }
     s.push_str("    ret\n");
     Ok(s)
@@ -1810,6 +1811,7 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::FpStoreAbs(_)
                 | Token::Call(_)
                 | Token::OpenLocals(_)
+                | Token::CloseLocals(_)
                 | Token::LocalFetch(_)
                 | Token::LocalStore(_)
         )
@@ -2758,25 +2760,49 @@ mod tests {
     }
 
     #[test]
-    fn locals_lower_with_frame_teardown() {
-        // `: t { a } a a + ;` ~ open 1 local, store the arg, fetch it twice, add.
-        // The frame teardown (add r15, 8) must precede ret (WF66 replaces `;`).
+    fn locals_lower_with_paired_frame() {
+        // `: t { a } a a + ;` ~ open 1 local, store the arg, fetch it twice, add,
+        // close. Open/close are an explicit balanced pair so the unit can be
+        // inlined into another word as a correct nested frame.
         let toks = vec![
             Token::OpenLocals(1),
             Token::LocalStore(0),
             Token::LocalFetch(0),
             Token::LocalFetch(0),
             Token::Inline(Fop::Add),
+            Token::CloseLocals(1),
         ];
         assert!(is_deferrable(&toks));
         let asm = lower(&toks, "rt").unwrap();
         assert!(asm.contains("sub r15, 8"), "frame alloc:\n{asm}");
         assert!(asm.contains("mov rax, [r15 + 0]"), "local fetch:\n{asm}");
         assert!(asm.contains("mov [r15 + 0], rax"), "local store:\n{asm}");
-        // teardown before ret
-        let add_r15 = asm.find("add r15, 8").expect("teardown present");
+        let close = asm.find("add r15, 8").expect("teardown present");
         let ret = asm.find("    ret").expect("ret present");
-        assert!(add_r15 < ret, "teardown must precede ret:\n{asm}");
+        assert!(close < ret, "teardown before ret:\n{asm}");
+        assert!(wfasm::rasm::assemble(&asm).is_ok());
+    }
+
+    #[test]
+    fn locals_word_inlines_as_a_nested_frame() {
+        // Inlining a locals word = splicing its balanced unit: two open/close
+        // pairs nest, R15 stays balanced (equal sub/add counts).
+        let inner = [
+            Token::OpenLocals(1),
+            Token::LocalStore(0),
+            Token::LocalFetch(0),
+            Token::CloseLocals(1),
+        ];
+        // caller has its own frame, then inlines `inner` in the middle.
+        let mut outer = vec![Token::OpenLocals(2), Token::LocalStore(8)];
+        outer.extend_from_slice(&inner);
+        outer.push(Token::LocalFetch(0));
+        outer.push(Token::CloseLocals(2));
+        let asm = lower(&outer, "rt").unwrap();
+        let subs = asm.matches("sub r15,").count();
+        let adds = asm.matches("add r15,").count();
+        assert_eq!(subs, adds, "nested frames must balance:\n{asm}");
+        assert_eq!(subs, 2, "two frames (outer + inlined inner)");
         assert!(wfasm::rasm::assemble(&asm).is_ok());
     }
 
