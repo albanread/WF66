@@ -1959,6 +1959,128 @@ mod tests {
         eprintln!();
     }
 
+    #[test]
+    #[ignore = "diagnostic: cargo test -- --ignored --nocapture wf66_register_stats"]
+    fn wf66_register_stats() {
+        // How many GP registers WF66 allocates per word. rax is the permanent TOS
+        // (always present); rcx/rdx/rsi/rdi/r8/r9 are fusion scratch; r10/r11 are
+        // the read-only promotion pool. rbp (DSP) is not counted.
+        use CmpOp as C;
+        use Ctl as K;
+        use Fop::*;
+        use StackOp::*;
+        let st = |o| Token::Stack(o);
+        let corpus: Vec<(&str, Vec<Token>)> = vec![
+            ("a b +", vec![Token::Inline(Add)]),
+            ("dup *", vec![st(Dup), Token::Inline(Mul)]),
+            ("over", vec![st(Over)]),
+            ("swap", vec![st(Swap)]),
+            ("nip", vec![st(Nip)]),
+            ("tuck", vec![st(Tuck)]),
+            ("rot", vec![st(Rot)]),
+            ("-rot", vec![st(NegRot)]),
+            ("over over", vec![st(Over), st(Over)]),
+            ("swap over", vec![st(Swap), st(Over)]),
+            ("rot rot", vec![st(Rot), st(Rot)]),
+            ("2dup", vec![st(TwoDup)]),
+            ("2dup 2dup", vec![st(TwoDup), st(TwoDup)]),
+            ("2over", vec![st(TwoOver)]),
+            ("2swap", vec![st(TwoSwap)]),
+            ("@", vec![Token::Mem(MemOp::Fetch)]),
+            ("!", vec![Token::Mem(MemOp::Store)]),
+            (
+                "poly",
+                vec![
+                    st(Dup), st(Dup), Token::Inline(Mul), Token::Lit(3), Token::Inline(Mul),
+                    st(Swap), Token::Lit(2), Token::Inline(Mul), Token::Inline(Add),
+                    Token::Lit(7), Token::Inline(Add),
+                ],
+            ),
+            (
+                "sumsq",
+                vec![
+                    st(Dup), Token::Inline(Mul), st(Swap), st(Dup), Token::Inline(Mul),
+                    Token::Inline(Add),
+                ],
+            ),
+            (
+                "2pick + 2pick +",
+                vec![
+                    Token::Pick(2), Token::Inline(Add), Token::Pick(2), Token::Inline(Add),
+                ],
+            ),
+            (
+                "clamp0",
+                vec![
+                    st(Dup), Token::Cmp(C::ZeroLt), Token::Ctl(K::If), st(Drop), Token::Lit(0),
+                    Token::Ctl(K::Then),
+                ],
+            ),
+            (
+                "countdown",
+                vec![
+                    Token::Ctl(K::Begin), Token::Lit(1), Token::Inline(Sub), st(Dup),
+                    Token::Cmp(C::ZeroEq), Token::Ctl(K::Until), st(Drop),
+                ],
+            ),
+        ];
+
+        const REGS: [&str; 9] = ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];
+        let has = |body: &str, r: &str| {
+            body.split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|tok| tok == r)
+        };
+
+        let mut sum_extra = 0usize;
+        let mut max_extra = 0usize;
+        let mut hist = [0usize; 9]; // extra regs (beyond rax) -> word count
+        let mut promo_words = 0usize;
+        let mut per_reg = [0usize; 9];
+
+        eprintln!("\n  word                 #regs (excl rax)  registers used");
+        for (name, toks) in &corpus {
+            let body =
+                render(&promote_hot_cells(window_fuse(coalesce_dsp(parse_instrs(
+                    &lower(&reduce(toks), "w").unwrap(),
+                )))));
+            let used: Vec<&str> = REGS.iter().copied().filter(|r| has(&body, r)).collect();
+            let extra = used.iter().filter(|r| **r != "rax").count();
+            for (i, r) in REGS.iter().enumerate() {
+                if used.contains(r) {
+                    per_reg[i] += 1;
+                }
+            }
+            if used.contains(&"r10") || used.contains(&"r11") {
+                promo_words += 1;
+            }
+            sum_extra += extra;
+            max_extra = max_extra.max(extra);
+            hist[extra] += 1;
+            eprintln!("  {name:<20} {extra:^16}  {}", used.join(" "));
+        }
+
+        let n = corpus.len();
+        eprintln!("\n  --- summary over {n} words ---");
+        eprintln!(
+            "  avg extra regs/word = {:.2}   max = {max_extra}",
+            sum_extra as f64 / n as f64
+        );
+        eprint!("  distribution (extra regs -> words): ");
+        for (k, c) in hist.iter().enumerate() {
+            if *c > 0 {
+                eprint!("{k}:{c}  ");
+            }
+        }
+        eprintln!();
+        eprint!("  per-register use: ");
+        for (i, r) in REGS.iter().enumerate() {
+            if per_reg[i] > 0 {
+                eprint!("{r}:{}  ", per_reg[i]);
+            }
+        }
+        eprintln!("\n  words using a promotion reg (r10/r11) = {promo_words}\n");
+    }
+
     // ---- rbp-coalescing (Step 2.3) --------------------------------------
 
     #[test]
