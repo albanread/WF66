@@ -149,8 +149,9 @@ forth-wordlist set-current
     parse-name
     state @ locals# and if          \ inside a compiled definition with active locals?
         2dup check-local-store       \ try locals table first
-        if exit then                 \ found: inline store emitted; done
+        if exit then                 \ found: inline mov emitted (WF66 captures it); done
     then
+    (wf66-taint)                     \ value/ivar store bypasses the recorder -> taint
     find-name dup 0= if drop throw_namereqd throw then
     drop                             ( nt )
     state @ over tfa@ 147 = and if   \ compiling AND target is a value-ivar (tag 147/0x93)?

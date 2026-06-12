@@ -1092,6 +1092,13 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
     if lbrace != 0 && xt == lbrace {
         return 0;
     }
+    // `to` is transparent: `to local` emits an inline mov captured by the store
+    // hook (rt_ir_local_store); `to value` taints itself via (wf66-taint) on its
+    // value path. So don't auto-taint `to` here.
+    let to_xt = unsafe { *((up + crate::USER_WF66_TO) as *const u64) };
+    if to_xt != 0 && xt == to_xt {
+        return 0;
+    }
     WF66_IR.with(|b| {
         let mut b = b.borrow_mut();
         if let Some(f) = wf66_fop_of(up, xt) {

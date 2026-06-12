@@ -2050,7 +2050,7 @@ fn wf66_locals_words_match_eager() {
         (": t3 {: a :} a a a + + ;", "4 t3 .\n"),              // 12
         (": t4 {: a b :} a b - a b + * ;", "9 4 t4 .\n"),      // (a-b)*(a+b)=65
         (": t5 {: a b c :} a b c + + ;", "1 2 3 t5 .\n"),      // 6 (slot offsets)
-        (": t6 {: a :} a 1+ to a a a + ;", "5 t6 .\n"),        // `to` -> taints, eager: 12
+        (": t6 {: a :} a 1+ to a a a + ;", "5 t6 .\n"),        // `to a` = LocalStore mov: 12
         (": t7 {: a b | c :} a b * ;", "3 4 t7 .\n"),          // |-uninit slot: n_init=2<n_total=3 -> 12
     ];
     for (def, run) in cases {
@@ -2104,19 +2104,26 @@ fn wf66_locals_word_is_optimized() {
             .unwrap();
         unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
     }
-    let src = ": sq3 {: a :} a a * ;\nbye\n";
-    let eager = {
-        let mut s = sess();
-        s.eval(src).unwrap();
-        body(&s, "sq3")
-    };
-    let wf66 = {
-        let mut s = sess();
-        s.set_wf66_enabled(true);
-        s.eval(src).unwrap();
-        body(&s, "sq3")
-    };
-    assert_ne!(eager, wf66, "locals word sq3 should be WF66-compiled, not tainted");
+    // Read-only locals, and a `to local` mutation (which must NOT taint now that
+    // `to` is transparent for the local case).
+    for name in ["sq3", "mut"] {
+        let src = "\
+: sq3 {: a :} a a * ;\n\
+: mut {: a :} a 1+ to a a ;\n\
+bye\n";
+        let eager = {
+            let mut s = sess();
+            s.eval(src).unwrap();
+            body(&s, name)
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(src).unwrap();
+            body(&s, name)
+        };
+        assert_ne!(eager, wf66, "locals word `{name}` should be WF66-compiled, not tainted");
+    }
 }
 
 #[test]

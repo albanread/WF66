@@ -103,6 +103,20 @@ proc(wf66_open_locals_word)
     next()
 endp()
 
+; (wf66-taint)  ( -- )
+;     Mark the current WF66 span non-deferrable (forces the eager body). Used by
+;     `to` on its value/ivar path: a value store bypasses the recorder, so it must
+;     taint -- whereas `to` on a local emits an inline mov that the recorder hook
+;     captures, and is left deferrable. No-op when not recording.
+proc(wf66_taint_word)
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .done
+    mov     rcx, UP
+    win64_call(rt_ir_taint)
+.done:
+    next()
+endp()
+
 ; (local@)  ( offset -- val )    Fetch [r15 + offset]; offset in bytes.
 proc(local_fetch_word)
     mov     rcx, TOS
