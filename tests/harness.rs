@@ -2004,6 +2004,24 @@ fvariable zr  fvariable zi  fvariable cre  fvariable cim\n\
 }
 
 #[test]
+fn wf66_fp_var_access_matches_eager() {
+    // fvariable f@/f! fuse to direct absolute FP load/store; results must match
+    // the eager kernel.
+    let src = "fvariable q\n: setq q f! ;\n: getq q f@ ;\n";
+    let prog = format!("{src}3.5e setq  getq f.  -2.25e setq  getq f.\nbye\n");
+    let eager = {
+        let mut s = sess();
+        s.eval(&prog).unwrap()
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(&prog).unwrap()
+    };
+    assert_eq!(eager, wf66, "fused FP var access must match eager");
+}
+
+#[test]
 fn wf66_variable_ref_is_deferrable() {
     // A variable reference must compile as a literal address push (not taint),
     // so a word using variables is WF66-optimized and still matches eager.

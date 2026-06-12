@@ -518,6 +518,13 @@ pub enum Token {
     FpStack(FpStackOp),
     /// An FP memory access (`f@ f!`): data-stack address, FP-stack value.
     FpMem(FpMemOp),
+    /// `f@` from a constant absolute address (fused `Lit(addr) f@`, e.g. an
+    /// `fvariable` reference + fetch). A direct FP load — no data-stack traffic
+    /// for the address.
+    FpFetchAbs(u64),
+    /// `f!` to a constant absolute address (fused `Lit(addr) f!`). A direct FP
+    /// store — no data-stack traffic for the address.
+    FpStoreAbs(u64),
     /// A settle-barrier call to a known word at absolute address `xt` (F2). The
     /// stacks are settled to canonical before the call (TOS in rax, FTOS in
     /// xmm15, DSP/FSP in memory), so the callee — which preserves every Forth
@@ -854,6 +861,25 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             }
             Token::FpStack(op) => op.emit(&mut s),
             Token::FpMem(op) => op.emit(&mut s),
+            // f@/f! to a CONSTANT address (fused var-ref + access): direct FP
+            // load/store, no data-stack traffic. rcx=FSP, rdx=addr; FSP store
+            // last so consecutive FP ops still fp_coalesce.
+            Token::FpFetchAbs(addr) => {
+                s.push_str(&format!("    mov rcx, [rbx + {FSP_OFF}]\n"));
+                s.push_str(&format!("    movsd qword ptr [rcx - {CELL}], xmm15\n"));
+                s.push_str(&format!("    movabs rdx, {addr}\n"));
+                s.push_str("    movsd xmm15, qword ptr [rdx]\n");
+                s.push_str(&format!("    sub rcx, {CELL}\n"));
+                s.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+            }
+            Token::FpStoreAbs(addr) => {
+                s.push_str(&format!("    mov rcx, [rbx + {FSP_OFF}]\n"));
+                s.push_str(&format!("    movabs rdx, {addr}\n"));
+                s.push_str("    movsd qword ptr [rdx], xmm15\n");
+                s.push_str("    movsd xmm15, qword ptr [rcx]\n");
+                s.push_str(&format!("    add rcx, {CELL}\n"));
+                s.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+            }
             // Settle-barrier call: at this point the data + FP stacks are settled
             // to canonical (the call is a Raw barrier, so coalesce flushed the
             // rbp adjust, TOS is in rax, FTOS in xmm15, FSP in memory). Call the
@@ -1120,7 +1146,7 @@ pub fn reduce(tokens: &[Token]) -> Vec<Token> {
 
 /// The per-`;` finalizer pipeline in one call: capture -> reduce -> lower.
 pub fn compile_definition(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
-    let reduced = reduce(tokens);
+    let reduced = fold_fp_abs_mem(&reduce(tokens));
     lower(&reduced, fn_name)
 }
 
@@ -1746,9 +1772,33 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::FpNeg
                 | Token::FpStack(_)
                 | Token::FpMem(_)
+                | Token::FpFetchAbs(_)
+                | Token::FpStoreAbs(_)
                 | Token::Call(_)
         )
     })
+}
+
+/// Fuse a constant address push immediately followed by an FP memory access into
+/// a direct absolute access (`Lit(addr) f@` -> `FpFetchAbs(addr)`), so an
+/// fvariable reference + fetch/store is a direct FP load/store with no data-stack
+/// round-trip for the address.
+fn fold_fp_abs_mem(tokens: &[Token]) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    for &t in tokens {
+        match (out.last(), t) {
+            (Some(&Token::Lit(k)), Token::FpMem(FpMemOp::FFetch)) => {
+                out.pop();
+                out.push(Token::FpFetchAbs(k as u64));
+            }
+            (Some(&Token::Lit(k)), Token::FpMem(FpMemOp::FStore)) => {
+                out.pop();
+                out.push(Token::FpStoreAbs(k as u64));
+            }
+            _ => out.push(t),
+        }
+    }
+    out
 }
 
 /// Error from the per-definition finalizer.
@@ -2648,6 +2698,26 @@ mod tests {
         assert_eq!(count(&after, "mov rcx, [rbx + 4632]"), 1, "after: 1 FSP load");
         assert_eq!(count(&after, "mov [rbx + 4632], rcx"), 1, "after: 1 FSP store");
         assert!(wfasm::rasm::assemble(&render(&after)).is_ok());
+    }
+
+    #[test]
+    fn fp_abs_mem_fuses_var_access() {
+        // Lit(addr) f@ -> FpFetchAbs ; Lit(addr) f! -> FpStoreAbs, lowering to a
+        // direct movsd via rdx (no data-stack push of the address).
+        let toks = vec![
+            Token::Lit(0x4000),
+            Token::FpMem(FpMemOp::FFetch),
+            Token::Lit(0x4000),
+            Token::FpMem(FpMemOp::FStore),
+        ];
+        assert_eq!(
+            fold_fp_abs_mem(&toks),
+            vec![Token::FpFetchAbs(0x4000), Token::FpStoreAbs(0x4000)]
+        );
+        let asm = lower(&fold_fp_abs_mem(&toks), "rt").unwrap();
+        assert!(asm.contains("movabs rdx, 16384"), "{asm}");
+        assert!(asm.contains("movsd xmm15, qword ptr [rdx]"), "{asm}");
+        assert!(wfasm::rasm::assemble(&asm).is_ok());
     }
 
     #[test]
