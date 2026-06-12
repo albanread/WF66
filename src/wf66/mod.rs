@@ -24,6 +24,10 @@
 //! code entered with that convention live and ending in `ret`.
 
 const CELL: i64 = 8;
+/// Offset of `user_FSP` (the FP stack pointer) in the user area (kernel
+/// `@assign user_FSP = 0x1218`). The FP stack pointer lives in memory at
+/// `[rbx + FSP_OFF]` (rbx = UP), not a register, so each FP op loads/stores it.
+const FSP_OFF: i64 = 0x1218;
 
 /// A primitive operation that lowers to its own native instruction — the
 /// charter's `Inline(fop)`. Phase 0 covers the foldable integer arithmetic /
@@ -226,6 +230,102 @@ impl MemOp {
     }
 }
 
+impl FpOp {
+    /// Settle-everywhere FP lowering (FTOS in `xmm15`, FNOS at the FP stack
+    /// pointer `[rbx + FSP_OFF]`, `xmm0`/`rcx` scratch). Verbatim mirror of
+    /// kernel `f+ f- f* f/`.
+    fn emit(self, out: &mut String) {
+        out.push_str(&format!("    mov rcx, [rbx + {FSP_OFF}]\n"));
+        match self {
+            // commutative: op FTOS with FNOS in place, then pop.
+            FpOp::Add => out.push_str("    addsd xmm15, qword ptr [rcx]\n"),
+            FpOp::Mul => out.push_str("    mulsd xmm15, qword ptr [rcx]\n"),
+            // non-commutative: FNOS (r1) <op> FTOS (r2) -> via xmm0, then pop.
+            FpOp::Sub => {
+                out.push_str("    movsd xmm0, qword ptr [rcx]\n");
+                out.push_str("    subsd xmm0, xmm15\n");
+                out.push_str("    movsd xmm15, xmm0\n");
+            }
+            FpOp::Div => {
+                out.push_str("    movsd xmm0, qword ptr [rcx]\n");
+                out.push_str("    divsd xmm0, xmm15\n");
+                out.push_str("    movsd xmm15, xmm0\n");
+            }
+        }
+        out.push_str(&format!("    add rcx, {CELL}\n"));
+        out.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+    }
+}
+
+impl FpStackOp {
+    /// Settle-everywhere FP-stack shuffle. Verbatim mirror of kernel `fdup`
+    /// `fdrop` `fswap` `fover`.
+    fn emit(self, out: &mut String) {
+        out.push_str(&format!("    mov rcx, [rbx + {FSP_OFF}]\n"));
+        match self {
+            // ( r -- r r ): spill FTOS to new FNOS, FSP -= cell.
+            FpStackOp::FDup => {
+                out.push_str(&format!("    movsd qword ptr [rcx - {CELL}], xmm15\n"));
+                out.push_str(&format!("    sub rcx, {CELL}\n"));
+                out.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+            }
+            // ( r -- ): reload FTOS from FNOS, FSP += cell.
+            FpStackOp::FDrop => {
+                out.push_str("    movsd xmm15, qword ptr [rcx]\n");
+                out.push_str(&format!("    add rcx, {CELL}\n"));
+                out.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+            }
+            // ( r1 r2 -- r2 r1 ): FTOS <-> [FSP], FSP unchanged.
+            FpStackOp::FSwap => {
+                out.push_str("    movsd xmm0, qword ptr [rcx]\n");
+                out.push_str("    movsd qword ptr [rcx], xmm15\n");
+                out.push_str("    movsd xmm15, xmm0\n");
+            }
+            // ( r1 r2 -- r1 r2 r1 ): push a copy of FNOS, FSP -= cell.
+            FpStackOp::FOver => {
+                out.push_str("    movsd xmm0, qword ptr [rcx]\n");
+                out.push_str(&format!("    movsd qword ptr [rcx - {CELL}], xmm15\n"));
+                out.push_str(&format!("    sub rcx, {CELL}\n"));
+                out.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+                out.push_str("    movsd xmm15, xmm0\n");
+            }
+        }
+    }
+}
+
+impl FpMemOp {
+    /// FP memory access (`f@ f!`): address in TOS (`rax`), value in FTOS
+    /// (`xmm15`); both top cells consumed. Verbatim mirror of kernel `f@`/`f!`.
+    fn emit(self, out: &mut String) {
+        match self {
+            // f@ ( f-addr -- ) ( F: -- r ): push [addr] onto the FP stack,
+            // drop the data-stack address.
+            FpMemOp::FFetch => {
+                out.push_str("    mov rcx, rax\n");
+                out.push_str(&format!("    mov rdx, [rbx + {FSP_OFF}]\n"));
+                out.push_str(&format!("    movsd qword ptr [rdx - {CELL}], xmm15\n"));
+                out.push_str(&format!("    sub rdx, {CELL}\n"));
+                out.push_str(&format!("    mov [rbx + {FSP_OFF}], rdx\n"));
+                out.push_str("    movsd xmm15, qword ptr [rcx]\n");
+                out.push_str("    mov rax, [rbp]\n");
+                out.push_str(&format!("    add rbp, {CELL}\n"));
+            }
+            // f! ( f-addr -- ) ( F: r -- ): store FTOS to [addr], pop the FP
+            // stack, drop the data-stack address.
+            FpMemOp::FStore => {
+                out.push_str("    mov rcx, rax\n");
+                out.push_str("    movsd qword ptr [rcx], xmm15\n");
+                out.push_str(&format!("    mov rdx, [rbx + {FSP_OFF}]\n"));
+                out.push_str("    movsd xmm15, qword ptr [rdx]\n");
+                out.push_str(&format!("    add rdx, {CELL}\n"));
+                out.push_str(&format!("    mov [rbx + {FSP_OFF}], rdx\n"));
+                out.push_str("    mov rax, [rbp]\n");
+                out.push_str(&format!("    add rbp, {CELL}\n"));
+            }
+        }
+    }
+}
+
 /// A structured control-flow marker (Phase 4a). Lowered settle-everywhere: the
 /// data stack is canonical (TOS in `rax`, rest in memory) at every branch and
 /// join, so branches need no phis — behavior-identical to WF65, the safe
@@ -342,6 +442,34 @@ enum CtlFrame {
     Begin { id: u32 },
 }
 
+/// A binary floating-point op on the FP stack (`f+ f- f* f/`). Mirrors [`Fop`]
+/// for the separate FP stack (FTOS cached in `xmm15`, FNOS+ in memory at the FP
+/// stack pointer `[rbx + user_FSP]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// An FP-stack shuffle (`fdup fdrop fswap fover`). Mirrors [`StackOp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpStackOp {
+    FDup,
+    FDrop,
+    FSwap,
+    FOver,
+}
+
+/// An FP memory access (`f@ f!`): the address is a data-stack cell (TOS), the
+/// value an FP-stack cell (FTOS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpMemOp {
+    FFetch,
+    FStore,
+}
+
 /// One IR token of a straight-line span (charter §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -382,6 +510,14 @@ pub enum Token {
     /// pick reduce to dup/over.) Lowers to a single load — faster than runtime
     /// pick and than the deep shuffles written to avoid it.
     Pick(u32),
+    /// A binary floating-point op (`f+ f- f* f/`) on the FP stack.
+    FpBin(FpOp),
+    /// `fnegate` — negate FTOS (FP depth unchanged).
+    FpNeg,
+    /// An FP-stack shuffle (`fdup fdrop fswap fover`).
+    FpStack(FpStackOp),
+    /// An FP memory access (`f@ f!`): data-stack address, FP-stack value.
+    FpMem(FpMemOp),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -679,6 +815,18 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
                 s.push_str(&format!("    mov rax, [rbp + {off}]\n"));
                 s.push_str(&format!("    sub rbp, {CELL}\n"));
             }
+            // ── floating point (settle-everywhere; mirrors kernel/float.masm) ──
+            // FTOS in xmm15, FNOS+ in memory at the FP stack pointer
+            // [rbx + FSP_OFF], xmm0 scratch. Patterns copied verbatim from the
+            // kernel so WF66's FP body interoperates with the eager FP path.
+            Token::FpBin(op) => op.emit(&mut s),
+            Token::FpNeg => {
+                s.push_str("    xorpd xmm0, xmm0\n");
+                s.push_str("    subsd xmm0, xmm15\n");
+                s.push_str("    movsd xmm15, xmm0\n");
+            }
+            Token::FpStack(op) => op.emit(&mut s),
+            Token::FpMem(op) => op.emit(&mut s),
             Token::PickWord | Token::Word { .. } | Token::Opaque => {
                 return Err(LowerError::Unsupported(t))
             }
@@ -1532,6 +1680,10 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::Cmp(_)
                 | Token::CmpCtl(_, _)
                 | Token::Pick(_)
+                | Token::FpBin(_)
+                | Token::FpNeg
+                | Token::FpStack(_)
+                | Token::FpMem(_)
         )
     })
 }
@@ -2352,6 +2504,55 @@ mod tests {
             "at most one rbp adjust should remain: {opt:?}"
         );
         assert!(wfasm::rasm::assemble(&render(&opt)).is_ok());
+    }
+
+    // ---- floating point (settle-everywhere, mirrors kernel/float.masm) ---
+
+    #[test]
+    fn fp_bodies_are_deferrable_and_compile() {
+        use FpOp::*;
+        use FpStackOp::*;
+        let bodies: Vec<Vec<Token>> = vec![
+            vec![Token::FpBin(Add)],
+            vec![Token::FpBin(Sub)],
+            vec![Token::FpBin(Mul)],
+            vec![Token::FpBin(Div)],
+            vec![Token::FpNeg],
+            vec![Token::FpStack(FDup)],
+            vec![Token::FpStack(FDrop)],
+            vec![Token::FpStack(FSwap)],
+            vec![Token::FpStack(FOver)],
+            vec![Token::FpMem(FpMemOp::FFetch)],
+            vec![Token::FpMem(FpMemOp::FStore)],
+            // leaf FP words a caller would write to get the optimizer's reach:
+            vec![Token::FpBin(Mul), Token::FpBin(Add)], // f* f+
+            vec![Token::FpStack(FOver), Token::FpBin(Mul), Token::FpBin(Add)],
+            vec![Token::FpStack(FDup), Token::FpBin(Mul)], // square: fdup f*
+        ];
+        for b in &bodies {
+            assert!(is_deferrable(b), "FP body should be deferrable: {b:?}");
+            let bytes = compile_body_bytes(b);
+            assert!(
+                matches!(&bytes, Ok(v) if !v.is_empty()),
+                "FP body failed to compile: {b:?} -> {:?}",
+                bytes.err()
+            );
+        }
+    }
+
+    #[test]
+    fn fp_add_matches_kernel_pattern() {
+        // settle-everywhere f+ must match kernel/float.masm verbatim (FTOS=xmm15,
+        // FSP at [rbx + 0x1218] = [rbx + 4632]).
+        let asm = lower(&[Token::FpBin(FpOp::Add)], "rt").unwrap();
+        for needle in [
+            "mov rcx, [rbx + 4632]",
+            "addsd xmm15, qword ptr [rcx]",
+            "add rcx, 8",
+            "mov [rbx + 4632], rcx",
+        ] {
+            assert!(asm.contains(needle), "f+ lowering missing {needle:?}:\n{asm}");
+        }
     }
 
     // ---- window fusion / auto-pick (Step 2.4) ---------------------------
