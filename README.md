@@ -11,21 +11,24 @@ WF65 emits code eagerly and then *replays* (rewind + rewrite) to optimize. WF66
 captures each definition as a **token IR, optimizes the tokens as data, and only
 then generates code** — a real front-end → optimizer → back-end split.
 
-Design set:
-
-- **[docs/design/wf66_charter.md](docs/design/wf66_charter.md)** — the contract:
-  outer-interpreter/IR-builder split, the three compile-time word classes,
-  two-sources-of-truth, exceptions, and the WF65 differential oracle.
-- **[docs/design/wf66_compiler.md](docs/design/wf66_compiler.md)** — the
-  architecture: token IR + CFG, stack-flow → SSA, the optimizer passes,
-  cross-block register allocation, and JASM/Rasm codegen.
-- **[docs/design/wf66_roadmap.md](docs/design/wf66_roadmap.md)** — the authoritative
-  phase/sprint sequence (Phases 0–5).
-- **[docs/design/wf66_phase4_plan.md](docs/design/wf66_phase4_plan.md)** — Phase 4,
-  the CFG + register-allocation jump, in detail.
-
 The optimizer runs **Rust-side**; Forth stays the surface (outer interpreter,
-immediate words, `CREATE`/`DOES>`). That choice is settled in the charter.
+immediate words, `CREATE`/`DOES>`). This document is the authoritative as-built
+description — what follows is what shipped, not a plan. (Early design notes
+proposed a heavier CFG/SSA/cross-block-register-allocation architecture; that was
+**not** the path taken — WF66 is a pattern-rewriter plus a deferred-assembly
+buffer, which got most of the win for a fraction of the machinery. Those stale
+plan docs have been removed.)
+
+## Where it lands
+
+Honest positioning: **not VFX-class**, but **at or above SwiftForth** for the
+cases that matter — hot leaf words and inlined hot paths. On the Mandelbrot inner
+loop (below) optimized Forth lands ~2.5× off hand-written MASM, with the residual
+being one specific thing (loop-carried register residency) rather than a broad
+code-quality gap. WF66 deliberately does **not** attempt whole-program register
+allocation across calls — that's unachievable (calls clobber registers) and
+unnecessary (the hot ~10% lives in call-free leaf regions); see the scope
+argument at the end.
 
 ## The optimizer (as built)
 
@@ -94,14 +97,15 @@ float-local reference fetches to the FP stack, `to` on it stores from the FP
 stack, and float literals (`3e`) are captured too — so a whole FP loop in one
 word (`begin/until` + float locals) WF66-compiles end to end.
 
-Why locals matter for the endgame: a local is word-private and can't be
-addressed, so it **can't alias** — making it the ideal register-promotion target,
-and (the user's rule) locals take priority over globals. The plan is to promote a
-leaf word's (or loop's) locals into registers for the word's duration and elide
-the frame when they're all register-resident — precisely how the hand-MASM owns
-its loop state. Inlining a locals word composes with this: the inlined unit's
-locals become register-resident in the caller's call-free body and the nested
-frame evaporates.
+Locals are also the natural register-promotion target: a local is word-private
+and can't be addressed, so it **can't alias**, and (by design) locals take
+priority over globals. WF66 stops here deliberately — it does not promote
+loop-carried locals into registers across a back-edge. That last step (keeping
+`zx`/`zy` in `xmm` across iterations, eliding the frame) is what would close the
+remaining ~2.5× to MASM, but it is **not pursued**: the optimizer is considered
+complete, and the current result is close enough to dedicated MASM for the
+intended use cases. The substrate (unaliasable locals, inlining as nested frames)
+is in place should that ever be revisited.
 
 **Floating point.** The FP stack mirrors the data stack (FTOS in `xmm15`, the
 rest in memory at `user_FSP`). `f+ f- f* f/ fnegate fdup fdrop fswap fover f@ f!`
@@ -146,9 +150,9 @@ WF66 keeps `zx`/`zy` in the `R15` locals frame — memory — and reloads them e
 iteration (the `begin` back-edge is a barrier, so promotion resets per iteration);
 the MASM keeps them in `xmm` registers *across* iterations. (The MASM even runs an
 escape test WF66 omits and is *still* faster — the win is register-vs-memory for
-the loop state, not the arithmetic.) Closing it is the next step: promote the
-unaliasable loop-carried locals into registers across the back-edge — exactly what
-locals were made the substrate for.
+the loop state, not the arithmetic.) That gap is left open by choice — ~2.5× off
+hand-tuned MASM is close enough for the intended use cases, and the optimizer work
+is complete.
 
 None of this is Mandelbrot-specific tuning: every optimization keys off a
 structural *pattern* (a leaf word, an unaliasable local, a call-free loop), and
@@ -171,16 +175,17 @@ That makes WF66's scope the *correct* one, not a limitation. WF66 optimizes
 owning the registers is legal in the first place — which is the same boundary the
 hand-MASM exploits. Whole-program register allocation across calls is not a thing
 to chase: it's unachievable (calls clobber registers) and unnecessary (the hot
-~10% of a program lives in leaf words). The remaining work is to own the registers
-*within a leaf word's loop* the way the MASM does — loop register allocation across
-the back-edge of a call-free loop — which is the next frontier the benchmark now
-measures.
+~10% of a program lives in leaf words). The one thing the MASM still does that
+WF66 doesn't — own the loop-carried registers *across* a call-free loop's
+back-edge — is a deliberate stopping point, not a deficiency to chase: the result
+is already at-or-above SwiftForth for these cases and close enough to dedicated
+MASM. **The optimizer is complete.**
 
-## Status
+## Status — optimizer complete
 
 Forked from the WF65 baseline; the LLVM backend was removed. The token-IR
 compiler and the deferred-assembly optimizer above — including **floating point**
-(FP ops, libm via settle-barrier calls, FP-stack-pointer caching),
+(FP ops + literals, libm via settle-barrier calls, FP-stack-pointer caching),
 **variable-reference-as-literal**, and **locals** (`{:`…`:}` incl. typed float
 locals and `to`-stores, captured and WF66-compiled, balanced frames that inline
 as nested frames) — are **implemented and on by opt-in** (`set_wf66_enabled`;
@@ -189,11 +194,15 @@ path as the fallback for any span WF66 cannot fully defer (`do`/`loop`, I/O,
 return-stack, FP comparisons — the current taint set; `begin/until` and float
 locals *are* handled).
 
+**The optimizer is feature-complete and this work is closed.** Subsequent work on
+WF66 will be elsewhere (not the optimizer). Performance lands at-or-above
+SwiftForth for hot leaf/loop code and ~2.5× off hand-written MASM, with the only
+remaining gap (loop-carried register residency) left open by deliberate choice.
+
 **WF65 is WF66's differential oracle** — identical source must produce identical
 *observable Forth state* (data stack, program-defined memory, output), even though
 WF66 emits different, faster bytes. It is a semantic cross-check, not a byte-for-byte
-spec; "≥ as optimised" is a bench-corpus tripwire, not a per-word gate (see the
-charter's *Test Strategy*).
+spec; "≥ as optimised" is a bench-corpus tripwire, not a per-word gate.
 
 Verified continuously by:
 
