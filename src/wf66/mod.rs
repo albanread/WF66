@@ -525,6 +525,17 @@ pub enum Token {
     /// `f!` to a constant absolute address (fused `Lit(addr) f!`). A direct FP
     /// store — no data-stack traffic for the address.
     FpStoreAbs(u64),
+    /// Allocate a locals frame of `n` cells on the locals stack (`sub r15, n*8`).
+    /// Lowering also emits the matching teardown (`add r15, n*8`) before `ret`,
+    /// because WF66's rewrite replaces the kernel's `;` frame-finishing. A local
+    /// is a private 64-bit cell at `[r15+offset]` — no aliasing is possible, so
+    /// these are the ideal register-promotion targets (a later pass).
+    OpenLocals(u32),
+    /// Push a local cell onto the data stack (`local`): `[r15+offset]` -> TOS.
+    /// Verbatim mirror of `check_local_emit_word`'s inline fetch.
+    LocalFetch(i32),
+    /// Store TOS into a local cell (`to local`): TOS -> `[r15+offset]`, drop.
+    LocalStore(i32),
     /// A settle-barrier call to a known word at absolute address `xt` (F2). The
     /// stacks are settled to canonical before the call (TOS in rax, FTOS in
     /// xmm15, DSP/FSP in memory), so the callee — which preserves every Forth
@@ -824,6 +835,9 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
     // unique labels within this body.
     let mut ctl: Vec<CtlFrame> = Vec::new();
     let mut ctl_id: u32 = 0;
+    // Locals frame size (cells); the teardown is emitted before every `ret`,
+    // since WF66's rewrite replaces the kernel `;`/EXIT frame-finishing.
+    let mut frame_cells: u32 = 0;
 
     for &t in tokens {
         match t {
@@ -880,6 +894,23 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
                 s.push_str(&format!("    add rcx, {CELL}\n"));
                 s.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
             }
+            // ── locals (private 64-bit cells at [r15+offset]; r15 = LP) ──────
+            Token::OpenLocals(n) => {
+                frame_cells = n; // teardown emitted before ret (WF66 replaces `;`)
+                s.push_str(&format!("    sub r15, {}\n", n as i64 * CELL));
+            }
+            Token::LocalFetch(off) => {
+                // mirror check_local_emit_word: push [r15+off] onto the data stack.
+                s.push_str(&format!("    mov [rbp - {CELL}], rax\n"));
+                s.push_str(&format!("    mov rax, [r15 + {off}]\n"));
+                s.push_str(&format!("    sub rbp, {CELL}\n"));
+            }
+            Token::LocalStore(off) => {
+                // TOS -> [r15+off], drop.
+                s.push_str(&format!("    mov [r15 + {off}], rax\n"));
+                s.push_str("    mov rax, [rbp]\n");
+                s.push_str(&format!("    add rbp, {CELL}\n"));
+            }
             // Settle-barrier call: at this point the data + FP stacks are settled
             // to canonical (the call is a Raw barrier, so coalesce flushed the
             // rbp adjust, TOS is in rax, FTOS in xmm15, FSP in memory). Call the
@@ -896,6 +927,9 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
 
     if !ctl.is_empty() {
         return Err(LowerError::UnbalancedControl); // unclosed IF
+    }
+    if frame_cells > 0 {
+        s.push_str(&format!("    add r15, {}\n", frame_cells as i64 * CELL));
     }
     s.push_str("    ret\n");
     Ok(s)
@@ -1775,6 +1809,9 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::FpFetchAbs(_)
                 | Token::FpStoreAbs(_)
                 | Token::Call(_)
+                | Token::OpenLocals(_)
+                | Token::LocalFetch(_)
+                | Token::LocalStore(_)
         )
     })
 }
@@ -2717,6 +2754,29 @@ mod tests {
         let asm = lower(&fold_fp_abs_mem(&toks), "rt").unwrap();
         assert!(asm.contains("movabs rdx, 16384"), "{asm}");
         assert!(asm.contains("movsd xmm15, qword ptr [rdx]"), "{asm}");
+        assert!(wfasm::rasm::assemble(&asm).is_ok());
+    }
+
+    #[test]
+    fn locals_lower_with_frame_teardown() {
+        // `: t { a } a a + ;` ~ open 1 local, store the arg, fetch it twice, add.
+        // The frame teardown (add r15, 8) must precede ret (WF66 replaces `;`).
+        let toks = vec![
+            Token::OpenLocals(1),
+            Token::LocalStore(0),
+            Token::LocalFetch(0),
+            Token::LocalFetch(0),
+            Token::Inline(Fop::Add),
+        ];
+        assert!(is_deferrable(&toks));
+        let asm = lower(&toks, "rt").unwrap();
+        assert!(asm.contains("sub r15, 8"), "frame alloc:\n{asm}");
+        assert!(asm.contains("mov rax, [r15 + 0]"), "local fetch:\n{asm}");
+        assert!(asm.contains("mov [r15 + 0], rax"), "local store:\n{asm}");
+        // teardown before ret
+        let add_r15 = asm.find("add r15, 8").expect("teardown present");
+        let ret = asm.find("    ret").expect("ret present");
+        assert!(add_r15 < ret, "teardown must precede ret:\n{asm}");
         assert!(wfasm::rasm::assemble(&asm).is_ok());
     }
 
