@@ -21,11 +21,12 @@ plan docs have been removed.)
 
 ## Where it lands
 
-Honest positioning: **not VFX-class**, but **at or above SwiftForth** for the
-cases that matter — hot leaf words and inlined hot paths. On the Mandelbrot inner
-loop (below) optimized Forth lands ~2.5× off hand-written MASM, with the residual
-being one specific thing (loop-carried register residency) rather than a broad
-code-quality gap. WF66 deliberately does **not** attempt whole-program register
+Honest positioning, by what we actually measure: **not VFX-class**, but
+**measurably above the eager STC baseline** (its own WF65 oracle) for the cases
+that matter — hot leaf words and inlined hot paths (3.7× faster on the bench loop
+below). On the Mandelbrot inner loop optimized Forth lands ~2.6× off hand-written
+MASM, with the residual being one specific thing (loop-carried register residency)
+rather than a broad code-quality gap. WF66 deliberately does **not** attempt whole-program register
 allocation across calls — that's unachievable (calls clobber registers) and
 unnecessary (the hot ~10% lives in call-free leaf regions); see the scope
 argument at the end.
@@ -102,7 +103,7 @@ and can't be addressed, so it **can't alias**, and (by design) locals take
 priority over globals. WF66 stops here deliberately — it does not promote
 loop-carried locals into registers across a back-edge. That last step (keeping
 `zx`/`zy` in `xmm` across iterations, eliding the frame) is what would close the
-remaining ~2.5× to MASM, but it is **not pursued**: the optimizer is considered
+remaining ~2.6× to MASM, but it is **not pursued**: the optimizer is considered
 complete, and the current result is close enough to dedicated MASM for the
 intended use cases. The substrate (unaliasable locals, inlining as nested frames)
 is in place should that ever be revisited.
@@ -129,7 +130,7 @@ A pure-Forth Mandelbrot inner loop (`z = z² + c`, 5M iterations,
 
 ```
 Forth fvariable,    opt OFF:  ~153 ms   (eager: iter as a called leaf + FP-stack traffic)
-Forth fvariable,    opt ON :   ~41 ms   (3.8× faster — optimized leaf, eager loop)
+Forth fvariable,    opt ON :   ~41 ms   (3.7× faster — optimized leaf, eager loop)
 Forth float-locals, opt OFF:  ~110 ms   (eager; whole loop in one word)
 Forth float-locals, opt ON :   ~42 ms   (2.6× faster — the whole loop WF66-compiled)
 hand-rolled MASM           :   ~16 ms   (loop state in xmm registers, all in one word)
@@ -150,7 +151,7 @@ WF66 keeps `zx`/`zy` in the `R15` locals frame — memory — and reloads them e
 iteration (the `begin` back-edge is a barrier, so promotion resets per iteration);
 the MASM keeps them in `xmm` registers *across* iterations. (The MASM even runs an
 escape test WF66 omits and is *still* faster — the win is register-vs-memory for
-the loop state, not the arithmetic.) That gap is left open by choice — ~2.5× off
+the loop state, not the arithmetic.) That gap is left open by choice — ~2.6× off
 hand-tuned MASM is close enough for the intended use cases, and the optimizer work
 is complete.
 
@@ -178,8 +179,8 @@ to chase: it's unachievable (calls clobber registers) and unnecessary (the hot
 ~10% of a program lives in leaf words). The one thing the MASM still does that
 WF66 doesn't — own the loop-carried registers *across* a call-free loop's
 back-edge — is a deliberate stopping point, not a deficiency to chase: the result
-is already at-or-above SwiftForth for these cases and close enough to dedicated
-MASM. **The optimizer is complete.**
+is already well above the eager STC baseline for these cases and close enough to
+dedicated MASM. **The optimizer is complete.**
 
 ## Status — optimizer complete
 
@@ -195,9 +196,12 @@ return-stack, FP comparisons — the current taint set; `begin/until` and float
 locals *are* handled).
 
 **The optimizer is feature-complete and this work is closed.** Subsequent work on
-WF66 will be elsewhere (not the optimizer). Performance lands at-or-above
-SwiftForth for hot leaf/loop code and ~2.5× off hand-written MASM, with the only
-remaining gap (loop-carried register residency) left open by deliberate choice.
+WF66 will be elsewhere (not the optimizer) — and any future optimization should be
+driven by a real corpus to analyze (e.g. the OO code yet to be written), not by
+speculative passes against hand-written micro-benchmarks. Performance lands well
+above the eager STC baseline for hot leaf/loop code (3.7× on the bench loop) and
+~2.6× off hand-written MASM, with the only remaining gap (loop-carried register
+residency) left open by deliberate choice.
 
 **WF65 is WF66's differential oracle** — identical source must produce identical
 *observable Forth state* (data stack, program-defined memory, output), even though
