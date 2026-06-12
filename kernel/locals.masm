@@ -260,12 +260,11 @@ proc(check_local_emit_word)
     mov     dword ptr [rdi + 29], edx
     add     rdi, 33
     mov     [UP + user_HERE], rdi
-    ; WF66: float-local fetch isn't captured yet, so taint the span -> the word
-    ; falls back to the (correct) eager body under WF66. (Proper capture next.)
+    ; WF66: record the float-local fetch (rdx still = byte offset; UP in rbx).
     cmp     qword ptr [UP + user_WF66_REC], 0
     je      .matched_done
     mov     rcx, UP
-    win64_call(rt_ir_taint)
+    win64_call(rt_ir_local_ffetch)
 
 .matched_done:
     ; ( c-addr u -- -1 )
@@ -399,12 +398,11 @@ proc(check_local_store_word)
     mov     dword ptr [rdi + 28], user_FSP
     add     rdi, 32
     mov     [UP + user_HERE], rdi
-    ; WF66: float-local store isn't captured yet, so taint the span -> the word
-    ; falls back to the (correct) eager body under WF66. (Proper capture next.)
+    ; WF66: record the float-local store (rdx still = byte offset; UP in rbx).
     cmp     qword ptr [UP + user_WF66_REC], 0
     je      .matched_done
     mov     rcx, UP
-    win64_call(rt_ir_taint)
+    win64_call(rt_ir_local_fstore)
 
 .matched_done:
     ; ( c-addr u -- -1 )

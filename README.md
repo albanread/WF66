@@ -86,19 +86,22 @@ the recorder's capture point — and `;` appends the paired teardown so the body
 a **balanced `[OpenLocals … CloseLocals]` unit**. That balance is what lets a
 locals word inline correctly: a caller splices the whole unit as a *nested frame*
 (`R15` dips and pops, the caller's own locals untouched while the inner frame is
-open). Local fetches (and `to`-stores) are inline-emitted by the kernel, so the
-kernel calls the recorder directly for them. `to`-stores currently taint (a `to`
-is an unrecognized immediate, and it's polymorphic over values vs locals), so a
-word that assigns a local falls back to the eager body for now.
+open). Local fetches and `to`-stores are inline-emitted by the kernel, so the
+kernel calls the recorder directly for them; `to` is made transparent (it's
+type-aware via the store emitter, so `to intlocal` is a `mov` and `to floatlocal`
+is a `movsd`). **Typed float locals** (`{: n | float zx :}`) are first-class: a
+float-local reference fetches to the FP stack, `to` on it stores from the FP
+stack, and float literals (`3e`) are captured too — so a whole FP loop in one
+word (`begin/until` + float locals) WF66-compiles end to end.
 
-Why locals matter for the endgame below: a local is word-private and can't be
+Why locals matter for the endgame: a local is word-private and can't be
 addressed, so it **can't alias** — making it the ideal register-promotion target,
 and (the user's rule) locals take priority over globals. The plan is to promote a
-leaf word's locals into registers for the word's duration and elide the frame
-entirely when they're all register-resident — which is precisely how the
-hand-MASM owns its loop state. Inlining a locals word then composes: the inlined
-unit's locals become register-resident in the caller's call-free body and the
-nested frame evaporates.
+leaf word's (or loop's) locals into registers for the word's duration and elide
+the frame when they're all register-resident — precisely how the hand-MASM owns
+its loop state. Inlining a locals word composes with this: the inlined unit's
+locals become register-resident in the caller's call-free body and the nested
+frame evaporates.
 
 **Floating point.** The FP stack mirrors the data stack (FTOS in `xmm15`, the
 rest in memory at `user_FSP`). `f+ f- f* f/ fnegate fdup fdrop fswap fover f@ f!`
@@ -121,30 +124,31 @@ A pure-Forth Mandelbrot inner loop (`z = z² + c`, 5M iterations,
 `wf66_mandel_inner_bench`):
 
 ```
-Forth fvariable, opt OFF:  ~164 ms    (eager: iter as a called leaf + FP-stack traffic)
-Forth fvariable, opt ON :   ~42 ms    (3.9× faster — optimized leaf, eager loop)
-Forth FLOAT LOCALS      :  ~128 ms    (one word, no per-iter call; eager — see below)
-hand-rolled MASM        :   ~16 ms    (loop state in xmm registers, all in one word)
+Forth fvariable,    opt OFF:  ~153 ms   (eager: iter as a called leaf + FP-stack traffic)
+Forth fvariable,    opt ON :   ~41 ms   (3.8× faster — optimized leaf, eager loop)
+Forth float-locals, opt OFF:  ~110 ms   (eager; whole loop in one word)
+Forth float-locals, opt ON :   ~42 ms   (2.6× faster — the whole loop WF66-compiled)
+hand-rolled MASM           :   ~16 ms   (loop state in xmm registers, all in one word)
 ```
 
-So the optimizer recovers about **three-quarters of the hand-tuning gap**
-automatically (eager is ~3.9× slower than optimized; optimized Forth is ~2.6× off
-MASM).
+The **float-locals** rows are the instructive ones. Written with the loop state
+in float *locals* — the whole loop in one word, via `begin/until` (which WF66
+handles; `do/loop` still taints) — the loop body now WF66-compiles end to end:
+float-local fetches/stores, float literals, `f@`/`f!`, the counter local, and
+`to`-stores are all captured. That takes locals from **128 ms (eager) → 42 ms**,
+**2.6× faster** and now **on par with the optimized fvariable** (41 ms). So
+locals are a first-class optimized path, not a slower one — and the natural way
+to write a hot loop (state in named locals, no per-iteration call) is also a fast
+one.
 
-The **float-locals** row is the instructive one. Rewriting the loop with the
-state in float *locals* (one word, no per-iteration call) beats the naive
-fvariable-eager version (128 vs 164 ms) — but it's **3× slower than the optimized
-fvariable** (128 vs 42 ms), because a loop taints (and float-local capture isn't
-wired), so the locals version runs *eager*, with every `zx`/`zy` access going
-through the FP stack and the `R15` frame — memory. **Locals-in-memory don't make
-it fast; the win is registers.** The locals work is the *substrate* the
-register step runs on, not the speedup itself.
-
-The residual 2.6× is one thing: **loop-carried register residency.** The MASM
-keeps `zx`/`zy`/count in registers *across iterations*; WF66 keeps them in
-fvariables (or a locals frame) — memory — and settles at the loop back-edge.
-(The MASM even runs an escape test WF66 omits and is *still* faster — the win is
-register-vs-memory for the loop state, not the arithmetic.)
+The residual ~2.6× off MASM is one thing: **loop-carried register residency.**
+WF66 keeps `zx`/`zy` in the `R15` locals frame — memory — and reloads them each
+iteration (the `begin` back-edge is a barrier, so promotion resets per iteration);
+the MASM keeps them in `xmm` registers *across* iterations. (The MASM even runs an
+escape test WF66 omits and is *still* faster — the win is register-vs-memory for
+the loop state, not the arithmetic.) Closing it is the next step: promote the
+unaliasable loop-carried locals into registers across the back-edge — exactly what
+locals were made the substrate for.
 
 None of this is Mandelbrot-specific tuning: every optimization keys off a
 structural *pattern* (a leaf word, an unaliasable local, a call-free loop), and
@@ -177,12 +181,13 @@ measures.
 Forked from the WF65 baseline; the LLVM backend was removed. The token-IR
 compiler and the deferred-assembly optimizer above — including **floating point**
 (FP ops, libm via settle-barrier calls, FP-stack-pointer caching),
-**variable-reference-as-literal**, and **locals** (`{:`…`:}` captured and
-WF66-compiled, balanced frames that inline as nested frames) — are **implemented
-and on by opt-in** (`set_wf66_enabled`; default-on in the IDE, toggle under
-Forth → WF66 Optimizer), with the eager WF65 path as the fallback for any span
-WF66 cannot fully defer (`do`/`loop`, I/O, return-stack, FP comparisons, `to`-on-
-locals — the current taint set).
+**variable-reference-as-literal**, and **locals** (`{:`…`:}` incl. typed float
+locals and `to`-stores, captured and WF66-compiled, balanced frames that inline
+as nested frames) — are **implemented and on by opt-in** (`set_wf66_enabled`;
+default-on in the IDE, toggle under Forth → WF66 Optimizer), with the eager WF65
+path as the fallback for any span WF66 cannot fully defer (`do`/`loop`, I/O,
+return-stack, FP comparisons — the current taint set; `begin/until` and float
+locals *are* handled).
 
 **WF65 is WF66's differential oracle** — identical source must produce identical
 *observable Forth state* (data stack, program-defined memory, output), even though

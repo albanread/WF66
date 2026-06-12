@@ -38,6 +38,9 @@
 @extern rt_ir_finalize(1)       ; (UP) WF66: finalize; 1 if it rewrote the body, else 0
 @extern rt_ir_local_fetch(2)    ; (UP, offset) WF66: record an inline local fetch
 @extern rt_ir_local_store(2)    ; (UP, offset) WF66: record an inline `to local` store
+@extern rt_ir_local_ffetch(2)   ; (UP, offset) WF66: record a float-local fetch
+@extern rt_ir_local_fstore(2)   ; (UP, offset) WF66: record a float-local store
+@extern rt_ir_flit(2)           ; (UP, bits) WF66: record a float literal push
 @extern rt_ir_open_locals(3)    ; (UP, n_total, n_init) WF66: record the `{:` prologue
 @extern rt_slurp_file(2)        ; read file at (addr,len) into Rust Vec, return content ptr or 0
 @extern rt_slurp_len(0)         ; return byte length of top slurped file

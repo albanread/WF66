@@ -2006,15 +2006,18 @@ fvariable zr  fvariable zi  fvariable cre  fvariable cim\n\
     // word. The begin/until taints (loops aren't deferrable), so this is eager
     // either way -- the point is to compare locals-in-memory vs fvariables, and to
     // be the substrate the register-promotion step will run on.
+    // begin/until (WF66 handles it; do/loop taints) + float locals + the counter
+    // local. With FP literals/locals captured, the whole loop body WF66-compiles.
     let setup_locals = "\
 fvariable cre  fvariable cim\n\
 : brotl  {: n | float zx float zy float nzx :}\n\
     0e to zx  0e to zy\n\
-    n 0 do\n\
+    begin\n\
         zx zx f*  zy zy f*  f-  cre f@ f+  to nzx\n\
         zx zy f*  2e f*  cim f@ f+  to zy\n\
         nzx to zx\n\
-    loop  zx ;\n\
+        n 1- to n\n\
+    n 0= until  zx ;\n\
 0.285e cre f!  0.01e cim f!\n";
     fn run_locals(wf66: bool, setup: &str, n: u64) -> u128 {
         let mut s = sess();
@@ -2032,24 +2035,26 @@ fvariable cre  fvariable cim\n\
     let n = 5_000_000;
     let (off, _) = run_bench(false, setup, n);
     let (on, _) = run_bench(true, setup, n);
-    let loc = run_locals(true, setup_locals, n); // WF66 on, but the loop taints -> eager
+    let loc_off = run_locals(false, setup_locals, n);
+    let loc_on = run_locals(true, setup_locals, n);
     let masm = run_masm(n);
     eprintln!("\n  Mandelbrot inner loop, {n} iters (z = z^2 + c):");
-    eprintln!("    Forth fvariable, opt OFF: {off:>8} us");
+    eprintln!("    Forth fvariable, opt OFF : {off:>8} us");
     eprintln!(
-        "    Forth fvariable, opt ON : {on:>8} us   ({:.2}x faster than off)",
+        "    Forth fvariable, opt ON  : {on:>8} us   ({:.2}x faster than off)",
         off as f64 / on as f64
     );
+    eprintln!("    Forth float-locals, OFF  : {loc_off:>8} us   (eager, state in R15 frame)");
     eprintln!(
-        "    Forth FLOAT LOCALS      : {loc:>8} us   (loop taints -> eager; state in R15 frame)"
+        "    Forth float-locals, ON   : {loc_on:>8} us   ({:.2}x faster than off; loop WF66-compiled)",
+        loc_off as f64 / loc_on as f64
     );
     eprintln!(
-        "    hand-rolled MASM        : {masm:>8} us   (regs across iters + escape test)",
+        "    hand-rolled MASM         : {masm:>8} us   (regs across iters + escape test)",
     );
     eprintln!(
-        "    => optimized Forth is {:.2}x the MASM time (MASM {:.2}x faster)",
-        on as f64 / masm as f64,
-        on as f64 / masm as f64
+        "    => best Forth is {:.2}x the MASM time",
+        (on.min(loc_on)) as f64 / masm as f64,
     );
 }
 
@@ -2122,6 +2127,35 @@ fn wf66_to_local_in_loop_matches_eager() {
         };
         assert_eq!(eager, wf66, "WF66 != eager for `to`-in-loop `{def}` / `{run}`");
     }
+}
+
+#[test]
+fn wf66_fp_locals_loop_matches_eager() {
+    // The float-locals Mandelbrot loop (begin/until + FP locals + FP literals +
+    // the counter local) WF66-compiles whole; a bounded interior c keeps it from
+    // overflowing so the result is exact. Must match the eager kernel.
+    let src = "\
+fvariable cre  fvariable cim\n\
+: brotl  {: n | float zx float zy float nzx :}\n\
+    0e to zx  0e to zy\n\
+    begin\n\
+        zx zx f*  zy zy f*  f-  cre f@ f+  to nzx\n\
+        zx zy f*  2e f*  cim f@ f+  to zy\n\
+        nzx to zx\n\
+        n 1- to n\n\
+    n 0= until  zx zx f*  zy zy f*  f+ ;\n\
+-0.5e cre f!  0.1e cim f!\n";
+    let prog = format!("{src}100 brotl f.\nbye\n");
+    let eager = {
+        let mut s = sess();
+        s.eval(&prog).unwrap()
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(&prog).unwrap()
+    };
+    assert_eq!(eager, wf66, "WF66 float-locals loop must match eager");
 }
 
 #[test]

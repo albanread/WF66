@@ -313,13 +313,14 @@ proc(interpret_source)
     call    fliteral
     jmp     .tokens
 .do_fliteral:
-    ; WF66: Phase 0 IR does not model float literals; taint the span so the
-    ; eager body is kept.
+    ; WF66: capture the float literal (bits in FTOS=xmm15) before `fliteral`
+    ; consumes it. xmm15 is Win64 non-volatile, so it survives the call.
     cmp     qword ptr [UP + user_WF66_REC], 0
     je      .do_fliteral_eager
     push    rax
+    movq    rdx, xmm15                      ; arg2 = float bits
     mov     rcx, UP
-    win64_call(rt_ir_taint)
+    win64_call(rt_ir_flit)
     pop     rax
 .do_fliteral_eager:
     call    fliteral

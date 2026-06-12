@@ -1250,6 +1250,30 @@ pub extern "C" fn rt_ir_local_store(_up: u64, offset: u64) -> u64 {
     0
 }
 
+/// Record a float-local fetch (`check_local_emit_word`'s FP branch): `[r15+off]`
+/// -> FP stack. Args: UP, byte offset. Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_local_ffetch(_up: u64, offset: u64) -> u64 {
+    WF66_IR.with(|b| b.borrow_mut().local_ffetch(offset as i32));
+    0
+}
+
+/// Record a float-local store (`to floatlocal`, `check_local_store_word`'s FP
+/// branch): FP stack -> `[r15+off]`. Args: UP, byte offset. Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_local_fstore(_up: u64, offset: u64) -> u64 {
+    WF66_IR.with(|b| b.borrow_mut().local_fstore(offset as i32));
+    0
+}
+
+/// Record a floating-point literal push. Arg: UP, the raw 64-bit pattern (the
+/// FTOS bits at compile time). Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_flit(_up: u64, bits: u64) -> u64 {
+    WF66_IR.with(|b| b.borrow_mut().flit(bits));
+    0
+}
+
 /// Record the `{:` prologue: a frame of `n_total` cells plus the `n_init`
 /// stack-initialized arg stores. `{:` calls this (via `(wf66-open-locals)`) with
 /// both counts because the prologue postpones `(open-locals)`/`(local!)` and so

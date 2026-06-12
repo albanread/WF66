@@ -525,6 +525,9 @@ pub enum Token {
     /// `f!` to a constant absolute address (fused `Lit(addr) f!`). A direct FP
     /// store — no data-stack traffic for the address.
     FpStoreAbs(u64),
+    /// A floating-point literal push (`3e`, `0.5e`): the raw 64-bit pattern is
+    /// pushed onto the FP stack. Mirrors `do_flit`, FSP-cache friendly.
+    FpLit(u64),
     /// Allocate a locals frame of `n` cells on the locals stack (`sub r15, n*8`).
     /// A local is a private 64-bit cell at `[r15+offset]` — no aliasing possible,
     /// so these are the ideal register-promotion targets (a later pass).
@@ -541,6 +544,13 @@ pub enum Token {
     LocalFetch(i32),
     /// Store TOS into a local cell (`to local`): TOS -> `[r15+offset]`, drop.
     LocalStore(i32),
+    /// Push a FLOAT local onto the FP stack (`float local`): `[r15+offset]` ->
+    /// FTOS. Mirrors `check_local_emit_word`'s FP branch, but uses the FSP-cache
+    /// (`rcx`) pattern so consecutive FP ops fp_coalesce.
+    LocalFFetch(i32),
+    /// Store FTOS into a float local (`to floatlocal`): FTOS -> `[r15+offset]`,
+    /// FP-pop. Mirrors `check_local_store_word`'s FP branch.
+    LocalFStore(i32),
     /// A settle-barrier call to a known word at absolute address `xt` (F2). The
     /// stacks are settled to canonical before the call (TOS in rax, FTOS in
     /// xmm15, DSP/FSP in memory), so the callee — which preserves every Forth
@@ -637,6 +647,21 @@ impl IrBuilder {
     /// A local fetch (the kernel's inline `[r15+offset]` -> data TOS).
     pub fn local_fetch(&mut self, offset: i32) {
         self.tokens.push(Token::LocalFetch(offset));
+    }
+
+    /// A float-local fetch (`[r15+offset]` -> FP stack).
+    pub fn local_ffetch(&mut self, offset: i32) {
+        self.tokens.push(Token::LocalFFetch(offset));
+    }
+
+    /// A float-local store (`to floatlocal`): FP stack -> `[r15+offset]`.
+    pub fn local_fstore(&mut self, offset: i32) {
+        self.tokens.push(Token::LocalFStore(offset));
+    }
+
+    /// A floating-point literal push (raw bit pattern).
+    pub fn flit(&mut self, bits: u64) {
+        self.tokens.push(Token::FpLit(bits));
     }
 
     /// Append the locals-frame teardown (paired with the OpenLocals), so the
@@ -923,6 +948,15 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
                 s.push_str(&format!("    add rcx, {CELL}\n"));
                 s.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
             }
+            Token::FpLit(bits) => {
+                // push the literal bit-pattern onto the FP stack (mirror do_flit).
+                s.push_str(&format!("    mov rcx, [rbx + {FSP_OFF}]\n"));
+                s.push_str(&format!("    movsd qword ptr [rcx - {CELL}], xmm15\n"));
+                s.push_str(&format!("    movabs rdx, {bits}\n"));
+                s.push_str("    movq xmm15, rdx\n");
+                s.push_str(&format!("    sub rcx, {CELL}\n"));
+                s.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+            }
             // ── locals (private 64-bit cells at [r15+offset]; r15 = LP) ──────
             Token::OpenLocals(n) => {
                 s.push_str(&format!("    sub r15, {}\n", n as i64 * CELL));
@@ -941,6 +975,24 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
                 s.push_str(&format!("    mov [r15 + {off}], rax\n"));
                 s.push_str("    mov rax, [rbp]\n");
                 s.push_str(&format!("    add rbp, {CELL}\n"));
+            }
+            // Float locals: mirror FpFetchAbs/FpStoreAbs (rcx=FSP, FSP store last so
+            // consecutive FP ops fp_coalesce) but source/dest is the frame slot.
+            Token::LocalFFetch(off) => {
+                // push [r15+off] onto the FP stack.
+                s.push_str(&format!("    mov rcx, [rbx + {FSP_OFF}]\n"));
+                s.push_str(&format!("    movsd qword ptr [rcx - {CELL}], xmm15\n"));
+                s.push_str(&format!("    movsd xmm15, qword ptr [r15 + {off}]\n"));
+                s.push_str(&format!("    sub rcx, {CELL}\n"));
+                s.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
+            }
+            Token::LocalFStore(off) => {
+                // FTOS -> [r15+off], FP-pop.
+                s.push_str(&format!("    mov rcx, [rbx + {FSP_OFF}]\n"));
+                s.push_str(&format!("    movsd qword ptr [r15 + {off}], xmm15\n"));
+                s.push_str("    movsd xmm15, qword ptr [rcx]\n");
+                s.push_str(&format!("    add rcx, {CELL}\n"));
+                s.push_str(&format!("    mov [rbx + {FSP_OFF}], rcx\n"));
             }
             // Settle-barrier call: at this point the data + FP stacks are settled
             // to canonical (the call is a Raw barrier, so coalesce flushed the
@@ -1836,11 +1888,14 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::FpMem(_)
                 | Token::FpFetchAbs(_)
                 | Token::FpStoreAbs(_)
+                | Token::FpLit(_)
                 | Token::Call(_)
                 | Token::OpenLocals(_)
                 | Token::CloseLocals(_)
                 | Token::LocalFetch(_)
                 | Token::LocalStore(_)
+                | Token::LocalFFetch(_)
+                | Token::LocalFStore(_)
         )
     })
 }
