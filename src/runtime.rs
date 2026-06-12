@@ -895,14 +895,25 @@ pub fn wf66_register_call(xt: u64) {
     }
 }
 
-/// Max token-body size eligible for inlining (larger callees stay calls, i.e.
-/// taint the caller until the cross-word ABI lands in Phase 4).
-const WF66_INLINE_MAX: usize = 16;
+/// Max token-body size eligible for INLINING into a caller. WF66-optimized words
+/// are leaf words by construction, so inlining them flattens the hot path into
+/// its caller (which then optimizes as one). Generous because a caller of a
+/// larger optimized word falls back to a SETTLE-BARRIER CALL (never a taint), so
+/// this only bounds code bloat, not coverage.
+const WF66_INLINE_MAX: usize = 64;
 
-/// Clear the inline cache. Called from `Wf64Session::reset()` because a rolled-
-/// back word's xt can be reused by the next definition.
+/// Body_starts of WF66-optimized USER words, reachable via a settle-barrier call
+/// (the fallback when a caller's callee is too large to inline). GLOBAL like
+/// WF66_CALL, but CLEARED on reset (a rolled-back word's address can be reused).
+static WF66_CALL_USER: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// Clear the inline + user-call caches. Called from `Wf64Session::reset()`
+/// because a rolled-back word's xt/address can be reused by the next definition.
 pub fn wf66_clear_inline_cache() {
     WF66_INLINE.with(|m| m.borrow_mut().clear());
+    if let Ok(mut v) = WF66_CALL_USER.lock() {
+        v.clear();
+    }
 }
 
 /// Start capturing a new definition (from `:`). Arg: UP. Returns 0.
@@ -1134,7 +1145,9 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
                 eprintln!("[wf66] word xt={xt:#x} -> INLINE {} tokens", toks.len());
             }
             b.splice(&toks);
-        } else if WF66_CALL.lock().map(|v| v.contains(&xt)).unwrap_or(false) {
+        } else if WF66_CALL.lock().map(|v| v.contains(&xt)).unwrap_or(false)
+            || WF66_CALL_USER.lock().map(|v| v.contains(&xt)).unwrap_or(false)
+        {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> CALL (settle-barrier)");
             }
@@ -1196,8 +1209,14 @@ pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
     if body_start == 0 {
         return 0;
     }
-    // Cache small deferrable bodies (keyed by xt) so later definitions can
-    // inline them (Phase 3).
+    // An optimized word is a first-class callee for later definitions: inline it
+    // (small) or settle-barrier-call it (large) — never taint the caller. Cache
+    // its tokens for inlining, and register its address for the call fallback.
+    if let Ok(mut v) = WF66_CALL_USER.lock() {
+        if !v.contains(&body_start) {
+            v.push(body_start);
+        }
+    }
     if toks.len() <= WF66_INLINE_MAX {
         WF66_INLINE.with(|m| m.borrow_mut().insert(body_start, toks));
     }

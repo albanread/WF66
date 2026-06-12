@@ -1871,6 +1871,52 @@ fn wf66_fp_word_is_actually_optimized() {
 }
 
 #[test]
+fn wf66_inlines_optimized_leaf_words() {
+    // A WF66-optimized leaf word is inlined into its caller, which then optimizes
+    // as one — so the caller's body differs from eager's (call-the-word) body,
+    // and the result still matches eager.
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    // integer: quad = sq sq; FP: fquad = fsq fsq.
+    for (src, caller, run) in [
+        (": sq dup * ;\n: quad sq sq ;\n", "quad", "3 quad .\n"),
+        (": fsq fdup f* ;\n: fquad fsq fsq ;\n", "fquad", "2e fquad f.\n"),
+    ] {
+        let def = format!("{src}bye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&def).unwrap();
+            body(&s, caller)
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&def).unwrap();
+            body(&s, caller)
+        };
+        assert_ne!(eager, wf66, "{caller} should inline its leaf word, not call it");
+        // and the inlined result must still match eager
+        let full = format!("{src}{run}bye\n");
+        let eout = {
+            let mut s = sess();
+            s.eval(&full).unwrap()
+        };
+        let wout = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&full).unwrap()
+        };
+        assert_eq!(eout, wout, "inlined {caller} result must match eager");
+    }
+}
+
+#[test]
 fn wf66_fp_math_calls_match_eager() {
     // libm math words reached via a settle-barrier call (F2): a leaf word that
     // does FP arithmetic AND calls fsqrt/fsin/... must WF66-compile (no taint)
