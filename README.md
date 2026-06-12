@@ -35,7 +35,9 @@ argument at the end.
 
 One idea, applied at two levels: **recognize a pattern, replace it with a
 cheaper equivalent, repeat to fixpoint.** There is no SSA form and no register
-allocator — both stages are pattern-driven rewriters.
+allocator — both stages are pattern-driven rewriters. Full design:
+**[docs/design/wf66_dual_level_reducer.md](docs/design/wf66_dual_level_reducer.md)**
+(the dual-level reducer — capture, both reducers, the ABI, soundness, testing).
 
 **1. Token-IR reduction (Forth level).** Each `:`…`;` body is captured as a token
 stream and reduced by a shift-reduce fixpoint engine — recognize the longest
