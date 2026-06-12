@@ -1276,6 +1276,11 @@ fn write_event(
             k = kind::EVAL_BUFFER;
             child = child_id;
         }
+        IGuiEvent::SetWf66 { .. } => {
+            // Typed Rust consumers (the wf64-ui worker) read this directly;
+            // C-ABI consumers get the EVAL_BUFFER catch-all (no payload).
+            k = kind::EVAL_BUFFER;
+        }
     }
 
     unsafe {

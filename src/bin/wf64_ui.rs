@@ -264,6 +264,14 @@ fn run_drain_loop(mut session: wf64::Wf64Session) {
                     panic!("bug-rust-panic triggered from Forth — testing crash recovery");
                 }
             }
+            IGuiEvent::SetWf66 { on } => {
+                session.set_wf66_enabled(on);
+                fconsole::append(if on {
+                    "∴ WF66 optimizer: on"
+                } else {
+                    "∴ WF66 optimizer: off"
+                });
+            }
             IGuiEvent::FrameClose => {
                 fconsole::append("∴ frame closing");
                 return;
@@ -337,6 +345,13 @@ fn boot_session(intro: bool) -> Option<wf64::Wf64Session> {
         }
     };
 
+    // WF66 token-IR optimizer: on by default in the IDE.  Read the shared flag
+    // (Forth → "WF66 Optimizer" toggles it) so a Restart keeps the user's
+    // current choice rather than snapping back to the default.
+    let wf66_on =
+        wf64::igui::channels::WF66_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+    session.set_wf66_enabled(wf66_on);
+
     // lib/core.f is now loaded automatically by Wf64Session::new()
     // before taking the boot snapshot — all standard words are already
     // present.  Resolve the same path the session would have used so
@@ -348,6 +363,10 @@ fn boot_session(intro: bool) -> Option<wf64::Wf64Session> {
         .map(|p| p.join("lib").join("core.f"))
         .unwrap_or_else(|| Path::new("lib").join("core.f"));
     fconsole::append(&format!("∴ loaded {}", core_path.display()));
+    fconsole::append(&format!(
+        "∴ WF66 optimizer {}",
+        if wf66_on { "enabled" } else { "disabled" }
+    ));
     // Preload a cushion of zeros so a couple of accidental
     // over-drops at the REPL don't immediately crash the worker.
     // Eight cells = one cache line; enough to recover from a

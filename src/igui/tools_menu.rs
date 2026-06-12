@@ -16,10 +16,13 @@
 
 #![cfg(windows)]
 
+use std::sync::atomic::{AtomicIsize, Ordering};
+
 use windows::core::PCWSTR;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, ACCEL, FCONTROL, FSHIFT,
-    FVIRTKEY, HACCEL, HMENU, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    AppendMenuW, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, ACCEL,
+    FCONTROL, FSHIFT, FVIRTKEY, HACCEL, HMENU, MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED,
 };
 
 use super::crash_view;
@@ -50,6 +53,29 @@ pub const DEMO_CMD_END:  u16 = 0x4FFF;
 
 /// Help → Documentation: open the bundled docs/ in-window as a help-pane.
 pub const HELP_CMD_DOCS: u16 = 0x5000;
+
+/// Forth → WF66 Optimizer: a checkable toggle for the token-IR optimizer.
+/// The on/off state itself lives in `channels::WF66_ENABLED` (shared with the
+/// language thread); this id just routes the click.
+pub const FORTH_WF66_CMD_ID: u16 = 0x3202;
+
+/// The Forth submenu HMENU, stashed at build time so the WM_COMMAND handler can
+/// flip the WF66 checkmark (`CheckMenuItem` needs the menu that owns the item).
+/// Stored as an isize; only ever read/written on the GUI thread.
+static FORTH_POPUP: AtomicIsize = AtomicIsize::new(0);
+
+/// Reflect the WF66-optimizer on/off state as a checkmark on its menu item.
+pub fn set_wf66_checkmark(on: bool) {
+    let raw = FORTH_POPUP.load(Ordering::Relaxed);
+    if raw == 0 {
+        return; // menu not built yet
+    }
+    let popup = HMENU(raw as *mut core::ffi::c_void);
+    let flag = if on { MF_CHECKED } else { MF_UNCHECKED };
+    unsafe {
+        CheckMenuItem(popup, FORTH_WF66_CMD_ID as u32, MF_BYCOMMAND.0 | flag.0);
+    }
+}
 
 // ─── Menu builders ────────────────────────────────────────────────────
 
@@ -172,7 +198,13 @@ pub fn append_forth_menu(bar: HMENU) {
         (FORTH_RESTART_CMD_ID,        "&Restart\tCtrl+Shift+F5"),
         (0,                           "SEP"),
         (fedit::EDIT_CMD_RUN_BUFFER,  "R&un Buffer\tF5"),
+        (0,                           "SEP"),
+        (FORTH_WF66_CMD_ID,           "WF66 &Optimizer"),
     ]);
+    // Remember the popup so the WM_COMMAND handler can flip the checkmark, and
+    // show the current optimizer state (on by default in the IDE).
+    FORTH_POPUP.store(popup.0 as isize, Ordering::Relaxed);
+    set_wf66_checkmark(super::channels::WF66_ENABLED.load(Ordering::Relaxed));
     append_popup(bar, "forth-menu", "Fo&rth", popup);
 }
 

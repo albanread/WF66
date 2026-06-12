@@ -28,6 +28,14 @@ pub fn set_interrupt_hook(hook: Option<fn()>) {
     }
 }
 
+/// Whether the WF66 token-IR optimizer is enabled.  The IDE defaults it ON;
+/// the Forth → "WF66 Optimizer" menu item toggles it.  Shared between the GUI
+/// thread (menu handler + checkmark) and the language thread, which applies it
+/// to the live session and re-reads it when Forth → Restart boots a fresh
+/// session — so the user's choice survives a restart.
+pub static WF66_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
 /// Stable enum tags exported to CP as `iGui.Ev*` constants.
 pub mod kind {
     pub const NONE: i64 = 0;
@@ -166,6 +174,13 @@ pub enum IGuiEvent {
     ReplSubmit {
         child_id: i64,
     },
+    /// "Enable/disable the WF66 token-IR optimizer."  Fired from the
+    /// Forth menu (Forth → WF66 Optimizer).  The worker applies it via
+    /// `session.set_wf66_enabled(on)`; the shared `WF66_ENABLED` flag was
+    /// already updated by the menu handler, so a later Restart honors it.
+    SetWf66 {
+        on: bool,
+    },
 }
 
 struct Mailbox {
@@ -269,7 +284,7 @@ pub fn discard_stashed_events() {
 /// when the filter is non-empty.
 fn matches_filter(ev: &IGuiEvent, filter: &HashSet<i64>) -> bool {
     match ev {
-        IGuiEvent::FrameClose | IGuiEvent::ThemeChange | IGuiEvent::EvalBuffer { .. } | IGuiEvent::ForthRestart | IGuiEvent::ForthInterrupt => true,
+        IGuiEvent::FrameClose | IGuiEvent::ThemeChange | IGuiEvent::EvalBuffer { .. } | IGuiEvent::ForthRestart | IGuiEvent::ForthInterrupt | IGuiEvent::SetWf66 { .. } => true,
         IGuiEvent::Menu { .. } => true,
         IGuiEvent::Key { child_id, .. }
         | IGuiEvent::Char { child_id, .. }
@@ -311,6 +326,7 @@ fn matches_target(ev: &IGuiEvent, target: i64) -> bool {
         | IGuiEvent::EvalBuffer { .. }
         | IGuiEvent::ForthRestart
         | IGuiEvent::ForthInterrupt
+        | IGuiEvent::SetWf66 { .. }
         | IGuiEvent::ReplSubmit { .. }
         | IGuiEvent::DpiChange { .. } => false,
         // Per-window events only match when their child_id is target.

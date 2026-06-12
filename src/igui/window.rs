@@ -946,6 +946,16 @@ unsafe extern "system" fn frame_wnd_proc(
                 }
                 return LRESULT(0);
             }
+            if cmd_id == super::tools_menu::FORTH_WF66_CMD_ID {
+                // Toggle the WF66 token-IR optimizer.  Flip the shared flag,
+                // reflect it as a menu checkmark, and hand the new state to the
+                // worker (which applies it to the live session).
+                use std::sync::atomic::Ordering;
+                let on = !super::channels::WF66_ENABLED.fetch_xor(true, Ordering::Relaxed);
+                super::tools_menu::set_wf66_checkmark(on);
+                super::channels::push(super::channels::IGuiEvent::SetWf66 { on });
+                return LRESULT(0);
+            }
             // ── Demos menu ──────────────────────────────────────
             // Look up the file by id, push the source as an
             // EvalBuffer event with an appended `<stem>` call so

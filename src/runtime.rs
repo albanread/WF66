@@ -2598,6 +2598,7 @@ fn decode_event(
         | IGuiEvent::EvalBuffer { .. }
         | IGuiEvent::ForthRestart
         | IGuiEvent::ForthInterrupt
+        | IGuiEvent::SetWf66 { .. }
         | IGuiEvent::ReplSubmit { .. } => (EV_NONE, 0, 0, 0, 0),
     }
 }
