@@ -618,6 +618,33 @@ impl IrBuilder {
         self.tokens.push(Token::Call(xt));
     }
 
+    /// Open a locals frame of `n` cells. The `{:` prologue (frame alloc + the
+    /// stack-initialized arg stores) is recorded as a unit by `rt_ir_open_locals`,
+    /// because `{:` *postpones* `(open-locals)`/`(local!)` and `postpone` compiles
+    /// via `compile_comma` -- bypassing the recorder's convergence point -- so the
+    /// prologue is invisible unless `{:` tells the recorder directly.
+    pub fn open_locals(&mut self, n: u32) {
+        self.tokens.push(Token::OpenLocals(n));
+    }
+
+    /// A local store: data TOS -> `[r15+offset]`. Used both for `{:`'s init stores
+    /// (synthesized in `rt_ir_open_locals`) and for `to local` (the kernel's inline
+    /// store, captured via `rt_ir_local_store`).
+    pub fn local_store(&mut self, offset: i32) {
+        self.tokens.push(Token::LocalStore(offset));
+    }
+
+    /// A local fetch (the kernel's inline `[r15+offset]` -> data TOS).
+    pub fn local_fetch(&mut self, offset: i32) {
+        self.tokens.push(Token::LocalFetch(offset));
+    }
+
+    /// Append the locals-frame teardown (paired with the OpenLocals), so the
+    /// stream is a balanced inlinable unit. Called by `rt_ir_finalize`.
+    pub fn close_locals(&mut self, n: u32) {
+        self.tokens.push(Token::CloseLocals(n));
+    }
+
     /// Splice a callee's token body into the current definition (Phase 3
     /// inlining). The spliced tokens then participate in the caller's fold /
     /// strength-reduce / DCE passes — folding across the former call boundary.

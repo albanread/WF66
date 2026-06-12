@@ -1082,6 +1082,16 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
     if xt == semi {
         return 0;
     }
+    // `{:` is immediate and would taint, but it's transparent: it records the
+    // locals PROLOGUE (frame alloc + the stack-init arg stores) directly via
+    // `(wf66-open-locals)` -> rt_ir_open_locals (it can't be captured here -- `{:`
+    // postpones (open-locals)/(local!) and `postpone` compiles via compile_comma,
+    // bypassing this convergence point). Fetches/`to`-stores come via the kernel
+    // hooks (rt_ir_local_fetch / rt_ir_local_store), and `;` appends CloseLocals.
+    let lbrace = unsafe { *((up + crate::USER_WF66_LBRACE) as *const u64) };
+    if lbrace != 0 && xt == lbrace {
+        return 0;
+    }
     WF66_IR.with(|b| {
         let mut b = b.borrow_mut();
         if let Some(f) = wf66_fop_of(up, xt) {
@@ -1214,6 +1224,46 @@ pub extern "C" fn rt_ir_taint(_up: u64) -> u64 {
     0
 }
 
+/// Record a local fetch the kernel is inline-emitting (`check_local_emit_word`):
+/// `[r15+offset]` -> data TOS. Args: UP, byte offset. Returns 0. Local fetches
+/// bypass the convergence point (they're emitted before find-name), so the
+/// kernel calls this directly so WF66 sees them.
+#[no_mangle]
+pub extern "C" fn rt_ir_local_fetch(_up: u64, offset: u64) -> u64 {
+    WF66_IR.with(|b| b.borrow_mut().local_fetch(offset as i32));
+    0
+}
+
+/// Record a `to local` store the kernel is inline-emitting (`check_local_store_word`):
+/// data TOS -> `[r15+offset]`. Args: UP, byte offset. Returns 0. (Same bypass
+/// reason as the fetch hook.)
+#[no_mangle]
+pub extern "C" fn rt_ir_local_store(_up: u64, offset: u64) -> u64 {
+    WF66_IR.with(|b| b.borrow_mut().local_store(offset as i32));
+    0
+}
+
+/// Record the `{:` prologue: a frame of `n_total` cells plus the `n_init`
+/// stack-initialized arg stores. `{:` calls this (via `(wf66-open-locals)`) with
+/// both counts because the prologue postpones `(open-locals)`/`(local!)` and so
+/// bypasses the recorder. The store offsets mirror `{:`'s own loop
+/// (`dup 1- i - cells` for i in 0..n_init), and `locals-set` assigns slot k the
+/// byte-offset k*8 -- so the i-th init store goes to `(n_init-1-i)*8` (the arg on
+/// top of the data stack lands in the highest init slot), matching the fetches.
+/// Args: UP, n_total, n_init. Returns 0.
+#[no_mangle]
+pub extern "C" fn rt_ir_open_locals(_up: u64, n_total: u64, n_init: u64) -> u64 {
+    WF66_IR.with(|c| {
+        let mut b = c.borrow_mut();
+        b.open_locals(n_total as u32);
+        let ni = n_init as i32;
+        for i in 0..ni {
+            b.local_store((ni - 1 - i) * 8);
+        }
+    });
+    0
+}
+
 /// Finalize the captured definition (from `;`). If the span is Phase-0
 /// deferrable, rewind HERE to the colon body start and overwrite the
 /// eagerly-compiled body with the folded/lowered WF66 body (including its
@@ -1223,6 +1273,14 @@ pub extern "C" fn rt_ir_taint(_up: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
     unsafe { *((up + crate::USER_WF66_REC) as *mut u64) = 0 };
+    // If the def declared locals, append the paired frame teardown. The kernel's
+    // `;` would emit `add r15, n*8`, but WF66's rewrite replaces that finish; the
+    // explicit CloseLocals also makes the cached token stream a balanced inlinable
+    // unit. (user_LOCALS_COUNT = 0x15C0; still live here — `;` zeros it after.)
+    let locals = unsafe { *((up + 0x15C0) as *const u64) };
+    if locals > 0 {
+        WF66_IR.with(|b| b.borrow_mut().close_locals(locals as u32));
+    }
     let toks: Vec<crate::wf66::Token> = WF66_IR.with(|b| b.borrow().tokens().to_vec());
     if wf66_dbg() {
         eprintln!("[wf66] finalize: {} tokens {:?}", toks.len(), toks);

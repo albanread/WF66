@@ -78,6 +78,28 @@ to taint its caller:
   construction, so a caller inlines it (small) or settle-barrier-calls it
   (large) — never taints.
 
+**Locals.** A `{:`…`:}` definition is captured and WF66-compiled. Locals live in
+a per-word frame (`R15`/LP, byte-offset slots); `{:` records its own prologue
+(frame alloc + the stack-init arg stores) into the IR via `(wf66-open-locals)` —
+it has to, because `{:` *postpones* the frame ops and `postpone` compiles past
+the recorder's capture point — and `;` appends the paired teardown so the body is
+a **balanced `[OpenLocals … CloseLocals]` unit**. That balance is what lets a
+locals word inline correctly: a caller splices the whole unit as a *nested frame*
+(`R15` dips and pops, the caller's own locals untouched while the inner frame is
+open). Local fetches (and `to`-stores) are inline-emitted by the kernel, so the
+kernel calls the recorder directly for them. `to`-stores currently taint (a `to`
+is an unrecognized immediate, and it's polymorphic over values vs locals), so a
+word that assigns a local falls back to the eager body for now.
+
+Why locals matter for the endgame below: a local is word-private and can't be
+addressed, so it **can't alias** — making it the ideal register-promotion target,
+and (the user's rule) locals take priority over globals. The plan is to promote a
+leaf word's locals into registers for the word's duration and elide the frame
+entirely when they're all register-resident — which is precisely how the
+hand-MASM owns its loop state. Inlining a locals word then composes: the inlined
+unit's locals become register-resident in the caller's call-free body and the
+nested frame evaporates.
+
 **Floating point.** The FP stack mirrors the data stack (FTOS in `xmm15`, the
 rest in memory at `user_FSP`). `f+ f- f* f/ fnegate fdup fdrop fswap fover f@ f!`
 all lower as a verbatim mirror of the kernel; **libm** (`fsqrt fsin fcos …`) is
@@ -137,11 +159,13 @@ measures.
 
 Forked from the WF65 baseline; the LLVM backend was removed. The token-IR
 compiler and the deferred-assembly optimizer above — including **floating point**
-(FP ops, libm via settle-barrier calls, FP-stack-pointer caching) and
-**variable-reference-as-literal** — are **implemented and on by opt-in**
-(`set_wf66_enabled`; default-on in the IDE, toggle under Forth → WF66 Optimizer),
-with the eager WF65 path as the fallback for any span WF66 cannot fully defer
-(`do`/`loop`, I/O, return-stack, FP comparisons — the current taint set).
+(FP ops, libm via settle-barrier calls, FP-stack-pointer caching),
+**variable-reference-as-literal**, and **locals** (`{:`…`:}` captured and
+WF66-compiled, balanced frames that inline as nested frames) — are **implemented
+and on by opt-in** (`set_wf66_enabled`; default-on in the IDE, toggle under
+Forth → WF66 Optimizer), with the eager WF65 path as the fallback for any span
+WF66 cannot fully defer (`do`/`loop`, I/O, return-stack, FP comparisons, `to`-on-
+locals — the current taint set).
 
 **WF65 is WF66's differential oracle** — identical source must produce identical
 *observable Forth state* (data stack, program-defined memory, output), even though
@@ -155,8 +179,9 @@ Verified continuously by:
   deferrable programs, WF66 output checked against the WF65 oracle;
 - the **ANS Forth-2012 core test suite**, run both eager *and* with WF66 enabled
   (`m7_ans_core_tests_pass{,_with_wf66}`);
-- FP, libm, variable-reference, and inlining **differential tests** (WF66 output
-  vs the eager kernel);
+- FP, libm, variable-reference, locals (incl. nested-frame inlining and
+  `|`-uninitialized slots), and inlining **differential tests** (WF66 output vs
+  the eager kernel);
 - focused unit tests for every reduction rule and instruction-buffer pass.
 
 Diagnostics worth knowing (`cargo test … -- --ignored --nocapture`):

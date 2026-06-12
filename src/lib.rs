@@ -526,6 +526,7 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("(close-locals)", "close_locals_word",       0),
     ("(local@)",       "local_fetch_word",        0),
     ("(local!)",       "local_store_word",        0),
+    ("(wf66-open-locals)", "wf66_open_locals_word", 0),
     ("locals#",        "locals_count_word",       0),
     ("locals#!",       "locals_count_store_word", 0),
     ("check-local-emit", "check_local_emit_word",  0),
@@ -862,6 +863,10 @@ pub(crate) const USER_WF66_VOC_FSWAP:  u64 = 0x1BB0; // fswap (fswap)
 pub(crate) const USER_WF66_VOC_FOVER:  u64 = 0x1BB8; // fover (fover)
 pub(crate) const USER_WF66_VOC_FFETCH: u64 = 0x1BC0; // f@    (f_fetch)
 pub(crate) const USER_WF66_VOC_FSTORE: u64 = 0x1BC8; // f!    (f_store)
+// Locals: the `{:` declarator (a Forth word, resolved by name) which the
+// recorder treats as transparent -- it records its own prologue via
+// `(wf66-open-locals)`; fetches/`to`-stores come via the kernel hooks.
+pub(crate) const USER_WF66_LBRACE: u64 = 0x1BE0;         // {:  (transparent)
 pub(crate) const USER_PIN_BUF:       u64 = 0x13000; // record buffer (2 cells/record)
 // pin-replay record sentinels (must match kernel/macros.masm).
 pub(crate) const PIN_REC_SKIP:       u64 = 1;
@@ -895,6 +900,7 @@ pub const PRIVATE_WORDS: &[&str] = &[
     "(comp-cons)", "(comp-2cons)", "(comp-fconst)", "(comp-val)", "(comp-only)",
     // Locals stack
     "(open-locals)", "(close-locals)", "(local@)", "(local!)",
+    "(wf66-open-locals)",
     "check-local-emit", "check-local-store", "locals#", "locals#!",
     "lp@", "lp0@", "lp-limit", "lp-smoke",
     // Control-flow assembly internals
@@ -1451,6 +1457,9 @@ impl Wf64Session {
                 "rt_ir_word"     => Some(runtime::rt_ir_word      as *mut c_void),
                 "rt_ir_taint"    => Some(runtime::rt_ir_taint     as *mut c_void),
                 "rt_ir_finalize" => Some(runtime::rt_ir_finalize  as *mut c_void),
+                "rt_ir_local_fetch" => Some(runtime::rt_ir_local_fetch as *mut c_void),
+                "rt_ir_local_store" => Some(runtime::rt_ir_local_store as *mut c_void),
+                "rt_ir_open_locals" => Some(runtime::rt_ir_open_locals as *mut c_void),
                 "rt_pin_analyze" => Some(runtime::rt_pin_analyze  as *mut c_void),
                 "rt_pin_rewrite" => Some(runtime::rt_pin_rewrite  as *mut c_void),
                 "rt_pin_emit_prologue"  => Some(runtime::rt_pin_emit_prologue  as *mut c_void),
@@ -1955,6 +1964,15 @@ impl Wf64Session {
             if let Ok(addr) = session.jit.lookup_addr(sym) {
                 crate::runtime::wf66_register_call(addr);
             }
+        }
+        // Locals: `{:` is a Forth word (resolved by name now that core.f is
+        // loaded) treated as transparent so it doesn't taint a locals-using word.
+        // It records its own prologue into the IR via `(wf66-open-locals)`.
+        if session.eval("' {:\n").is_ok() {
+            if let Some(&xt) = session.stack().first() {
+                session.write_user_u64(USER_WF66_LBRACE, xt as u64);
+            }
+            let _ = session.eval("drop\n");
         }
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);

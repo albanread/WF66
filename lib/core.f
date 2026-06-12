@@ -521,6 +521,12 @@ forth-wordlist set-current
     nip                                     \ drop after-pipe → ( n-init n-total )
     dup locals#!                            \ tell ; how many slots to release
 
+    \ WF66: record the prologue (frame + init stores) into the token-IR. The
+    \ optimizer can't capture it from the postpones below — postpone compiles via
+    \ compile_comma, bypassing the recorder — so {: tells it directly. No-op when
+    \ the optimizer isn't recording.
+    2dup (wf66-open-locals)                  \ ( n-init n-total -- n-init n-total )
+
     \ Compile n-total (open-locals) — allocates all slots including uninitialized.
     dup postpone literal postpone (open-locals)
 

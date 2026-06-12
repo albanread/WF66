@@ -84,6 +84,25 @@ proc(close_locals_word)
     next()
 endp()
 
+; (wf66-open-locals)  ( n-init n-total -- )
+;     Record the locals prologue (frame of n-total cells + the n-init stack-init
+;     stores) into the WF66 token-IR. `{:` calls this so the optimizer sees the
+;     prologue -- `{:` postpones (open-locals)/(local!), which compile via
+;     compile_comma and bypass the recorder's convergence point. No-op for the IR
+;     when not recording; always drops both counts.
+proc(wf66_open_locals_word)
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .drop
+    mov     rdx, TOS                            ; arg2 = n-total
+    mov     r8, [DSP]                           ; arg3 = n-init
+    mov     rcx, UP                             ; arg1 = UP
+    win64_call(rt_ir_open_locals)
+.drop:
+    mov     TOS, [DSP + cell]                   ; raise NNOS to TOS (drop both)
+    stk(2, 0)
+    next()
+endp()
+
 ; (local@)  ( offset -- val )    Fetch [r15 + offset]; offset in bytes.
 proc(local_fetch_word)
     mov     rcx, TOS
@@ -180,6 +199,14 @@ proc(check_local_emit_word)
     add     rdi, 15
     mov     [UP + user_HERE], rdi
 
+    ; WF66: record this inline local fetch so the optimizer sees it (it bypasses
+    ; the convergence point). rdx still = byte offset; UP in rbx.
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .lf_no_wf66
+    mov     rcx, UP
+    win64_call(rt_ir_local_fetch)
+.lf_no_wf66:
+
     ; ( c-addr u -- -1 )
     mov     TOS, -1
     stk(2, 1)
@@ -265,6 +292,14 @@ proc(check_local_store_word)
     mov     byte ptr [rdi + 14], 0x08
     add     rdi, 15
     mov     [UP + user_HERE], rdi
+
+    ; WF66: record this inline `to local` store so the optimizer sees it (it
+    ; bypasses the convergence point). rdx still = byte offset; UP in rbx.
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .ls_no_wf66
+    mov     rcx, UP
+    win64_call(rt_ir_local_store)
+.ls_no_wf66:
 
     ; ( c-addr u -- -1 )
     mov     TOS, -1
