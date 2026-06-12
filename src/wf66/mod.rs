@@ -1302,6 +1302,33 @@ fn render(instrs: &[Instr]) -> String {
     s
 }
 
+/// FP-stack-pointer coalescing (F1): the kernel reloads and stores `user_FSP`
+/// from memory on *every* FP op (it isn't a register like rbp). But within a run
+/// of consecutive FP ops FSP stays in `rcx`, so an op's trailing
+/// `mov [rbx+FSP], rcx` immediately followed by the next op's
+/// `mov rcx, [rbx+FSP]` is redundant — drop both. FSP is then loaded once at the
+/// run start and stored once before the next barrier, killing the per-op pointer
+/// traffic that makes Forth FP slow. Sound: the pair is adjacent (nothing reads
+/// FSP between), and the run's final store (unpaired) still settles memory
+/// before any call/control edge.
+fn fp_coalesce(instrs: Vec<Instr>) -> Vec<Instr> {
+    let load = format!("mov rcx, [rbx + {FSP_OFF}]");
+    let store = format!("mov [rbx + {FSP_OFF}], rcx");
+    let mut out: Vec<Instr> = Vec::with_capacity(instrs.len());
+    for ins in instrs {
+        if let Instr::Raw(l) = &ins {
+            if l.trim() == load
+                && matches!(out.last(), Some(Instr::Raw(p)) if p.trim() == store)
+            {
+                out.pop(); // drop the preceding store...
+                continue; // ...and skip this load (rcx already holds FSP)
+            }
+        }
+        out.push(ins);
+    }
+    out
+}
+
 /// rbp-coalescing (Step 2.3): defer the data-stack-pointer adjusts to the end of
 /// each barrier-free window, rewriting intervening cell displacements by the
 /// running delta. The N interspersed `add/sub rbp` of a shuffle run collapse to a
@@ -1924,9 +1951,11 @@ pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
     }
     let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
     // Deferred assembly: lex to instruction records, reduce, re-render.
-    // coalesce rbp adjusts (absolute disps) -> fuse each window to its minimal
-    // parallel-move (auto-pick) -> promote read-only hot cells to registers.
-    let instrs = promote_hot_cells(window_fuse(coalesce_dsp(parse_instrs(&asm))));
+    // fp_coalesce (cache the FP stack pointer in a register) -> coalesce rbp
+    // adjusts -> fuse each window to its minimal parallel-move (auto-pick) ->
+    // promote read-only hot cells to registers.
+    let instrs =
+        promote_hot_cells(window_fuse(coalesce_dsp(fp_coalesce(parse_instrs(&asm)))));
     let asm = render(&instrs);
     let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
     let fn_off = *module
@@ -2601,6 +2630,24 @@ mod tests {
             "Call body failed to assemble: {:?}",
             bytes.err()
         );
+    }
+
+    #[test]
+    fn fp_coalesce_removes_redundant_fsp_traffic() {
+        // f+ f+ : op1's FSP store + op2's FSP load are redundant -> dropped, so
+        // FSP is loaded once and stored once across the run.
+        let asm = lower(&[Token::FpBin(FpOp::Add), Token::FpBin(FpOp::Add)], "rt").unwrap();
+        let before = parse_instrs(&asm);
+        let after = fp_coalesce(before.clone());
+        let count = |is: &[Instr], pat: &str| {
+            is.iter()
+                .filter(|i| matches!(i, Instr::Raw(l) if l.contains(pat)))
+                .count()
+        };
+        assert_eq!(count(&before, "mov rcx, [rbx + 4632]"), 2, "before: 2 FSP loads");
+        assert_eq!(count(&after, "mov rcx, [rbx + 4632]"), 1, "after: 1 FSP load");
+        assert_eq!(count(&after, "mov [rbx + 4632], rcx"), 1, "after: 1 FSP store");
+        assert!(wfasm::rasm::assemble(&render(&after)).is_ok());
     }
 
     #[test]
