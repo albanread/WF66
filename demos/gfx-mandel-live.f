@@ -59,6 +59,6 @@ variable lm-rgb
     ['] lm-agent agent drop
     ." Mandelbrot rendering in the background — keep using the console." cr ;
 
-\ Auto-start on load: spawns the agent and returns immediately (no UI -> skips),
-\ so picking this demo begins rendering while the console stays interactive.
-gfx-mandel-live
+\ NOTE: this demo needs the cooperative IDE pump (agent scheduling on the worker
+\ thread), which is currently disabled because it conflicts with the IDE's SEH
+\ crash handler. Until that's resolved it does NOT auto-run and won't render.
