@@ -1241,36 +1241,60 @@ fn fuse_window(window: &[Instr], follow: &str) -> Option<Vec<Instr>> {
         .map(|(d, v)| (*d, *v))
         .collect();
     slot_assigns.sort_by_key(|(d, _)| *d);
-    // 5. emit the minimal parallel-move
-    let dest_slots: std::collections::HashSet<i64> = slot_assigns.iter().map(|(d, _)| *d).collect();
-    // source slots that are ALSO written must be snapshotted before any write
-    let mut preserve: Vec<i64> = Vec::new();
-    let mut note = |v: &Val, preserve: &mut Vec<i64>| {
-        if let Val::Slot(s) = v {
-            if dest_slots.contains(s) && !preserve.contains(s) {
-                preserve.push(*s);
-            }
-        }
-    };
-    note(&final_rax, &mut preserve);
+    // 5. emit the minimal parallel-move, holding hot/snapshotted source slots in
+    //    registers.  A source slot is loaded into a register ONCE when it is
+    //    either written (must be snapshotted before the overwrite) or read more
+    //    than once ("many reads, few writes" -> one load, reuse for every read).
+    //    A source read exactly once and never overwritten is read straight from
+    //    memory via a shared transient.
+    let dest_slots: std::collections::HashSet<i64> =
+        slot_assigns.iter().map(|(d, _)| *d).collect();
+
+    // How many times each source slot is read (slot writes + the rax move).
+    let mut read_count: HashMap<i64, usize> = HashMap::new();
     for (_, v) in &slot_assigns {
-        note(v, &mut preserve);
+        if let Val::Slot(s) = v {
+            *read_count.entry(*s).or_insert(0) += 1;
+        }
     }
-    let needs_transient = slot_assigns
-        .iter()
-        .any(|(_, v)| matches!(v, Val::Slot(s) if !dest_slots.contains(s)))
-        || matches!(final_rax, Val::Slot(s) if !dest_slots.contains(&s) && preserve.contains(&s));
+    if let Val::Slot(s) = final_rax {
+        *read_count.entry(s).or_insert(0) += 1;
+    }
+
     let pool = ["rsi", "rdi", "r8", "r9", "r10", "r11", "rcx", "rdx"];
-    if preserve.len() + usize::from(needs_transient) > pool.len() {
+    // Candidate source slots, hottest first: a written source ("mandatory" — it
+    // must be snapshotted) outranks a read-only one, then ranked by read count.
+    let mut srcs: Vec<i64> = read_count.keys().copied().collect();
+    srcs.sort_by(|a, b| {
+        dest_slots
+            .contains(b)
+            .cmp(&dest_slots.contains(a))
+            .then(read_count[b].cmp(&read_count[a]))
+            .then(a.cmp(b))
+    });
+    // Every written source must be held; bail only if even those can't fit.
+    let mandatory = srcs.iter().filter(|s| dest_slots.contains(s)).count();
+    if mandatory + 1 > pool.len() {
         return None;
     }
+    let mut held: Vec<i64> = srcs
+        .iter()
+        .copied()
+        .filter(|s| dest_slots.contains(s) || read_count[s] >= 2)
+        .collect();
+    // Keep one register free as the transient for direct (read-once) reads;
+    // if the hot set overflows, the coldest promotions fall back to direct.
+    if held.len() + 1 > pool.len() {
+        held.truncate(pool.len() - 1);
+    }
+
     let mut emitted: Vec<Instr> = Vec::new();
     let mut tmp_of: HashMap<i64, &str> = HashMap::new();
-    for (idx, s) in preserve.iter().enumerate() {
+    for (idx, s) in held.iter().enumerate() {
         emitted.push(Instr::Raw(format!("    mov {}, {}", pool[idx], mem_rbp(*s))));
         tmp_of.insert(*s, pool[idx]);
     }
-    let transient = pool.get(preserve.len()).copied();
+    let transient = pool.get(held.len()).copied();
     // changed slots (rax still holds entry value; written last)
     for (d, v) in &slot_assigns {
         match v {
@@ -1926,6 +1950,30 @@ mod tests {
         // fused away, because rcx is read by the following `mov [rax], rcx`.
         assert!(txt.contains("mov rcx, [rbp"), "rcx load preserved: {txt}");
         assert!(wfasm::rasm::assemble(&txt).is_ok());
+    }
+
+    #[test]
+    fn fuse_promotes_multiply_read_slot_to_one_load() {
+        use StackOp::*;
+        // `2dup 2dup` reads the deep cell `a` twice and never writes it: it must
+        // be loaded into a register once and reused, not re-read from memory.
+        // (A memory read renders as an operand after a comma: `, [rbp`.)
+        let txt = render(&fused(&[Token::Stack(TwoDup), Token::Stack(TwoDup)]));
+        let reads = txt.matches(", [rbp").count();
+        assert_eq!(reads, 1, "multiply-read slot should load once:\n{txt}");
+        assert!(wfasm::rasm::assemble(&txt).is_ok());
+    }
+
+    #[test]
+    fn fuse_reads_a_single_use_source_directly() {
+        use StackOp::*;
+        // `swap` reads NOS once -> no promotion needed, just the one direct read.
+        let txt = render(&fused(&[Token::Stack(Swap)]));
+        assert!(wfasm::rasm::assemble(&txt).is_ok());
+        // rot rot (a permutation) keeps its 4 accesses — promotion must not
+        // regress the already-minimal permutation realizer.
+        let rr = fused(&[Token::Stack(Rot), Token::Stack(Rot)]);
+        assert_eq!(mem_accesses(&rr), 4);
     }
 
     #[test]
