@@ -1328,7 +1328,9 @@ fn fuse_window(window: &[Instr], follow: &str) -> Option<Vec<Instr>> {
         *read_count.entry(s).or_insert(0) += 1;
     }
 
-    let pool = ["rsi", "rdi", "r8", "r9", "r10", "r11", "rcx", "rdx"];
+    // Fusion's scratch pool. r10/r11 are reserved for the block-level read-only
+    // hot-cell promoter (promote_hot_cells), so the two passes never collide.
+    let pool = ["rsi", "rdi", "r8", "r9", "rcx", "rdx"];
     // Candidate source slots, hottest first: a written source ("mandatory" — it
     // must be snapshotted) outranks a read-only one, then ranked by read count.
     let mut srcs: Vec<i64> = read_count.keys().copied().collect();
@@ -1355,40 +1357,161 @@ fn fuse_window(window: &[Instr], follow: &str) -> Option<Vec<Instr>> {
         held.truncate(pool.len() - 1);
     }
 
+    // Emit structured records (not Raw text) so a later pass can still read the
+    // cell traffic; render() turns these into the exact same bytes.
     let mut emitted: Vec<Instr> = Vec::new();
     let mut tmp_of: HashMap<i64, &str> = HashMap::new();
     for (idx, s) in held.iter().enumerate() {
-        emitted.push(Instr::Raw(format!("    mov {}, {}", pool[idx], mem_rbp(*s))));
+        emitted.push(Instr::LoadCell {
+            dst: pool[idx].to_string(),
+            disp: *s,
+        });
         tmp_of.insert(*s, pool[idx]);
     }
     let transient = pool.get(held.len()).copied();
     // changed slots (rax still holds entry value; written last)
     for (d, v) in &slot_assigns {
         match v {
-            Val::Rax => emitted.push(Instr::Raw(format!("    mov {}, rax", mem_rbp(*d)))),
+            Val::Rax => emitted.push(Instr::StoreCell {
+                disp: *d,
+                src: "rax".to_string(),
+            }),
             Val::Slot(s) => {
-                if let Some(t) = tmp_of.get(s) {
-                    emitted.push(Instr::Raw(format!("    mov {}, {t}", mem_rbp(*d))));
+                if let Some(&t) = tmp_of.get(s) {
+                    emitted.push(Instr::StoreCell {
+                        disp: *d,
+                        src: t.to_string(),
+                    });
                 } else {
                     let t = transient?;
-                    emitted.push(Instr::Raw(format!("    mov {t}, {}", mem_rbp(*s))));
-                    emitted.push(Instr::Raw(format!("    mov {}, {t}", mem_rbp(*d))));
+                    emitted.push(Instr::LoadCell {
+                        dst: t.to_string(),
+                        disp: *s,
+                    });
+                    emitted.push(Instr::StoreCell {
+                        disp: *d,
+                        src: t.to_string(),
+                    });
                 }
             }
         }
     }
     // rax last
     if let Val::Slot(s) = final_rax {
-        if let Some(t) = tmp_of.get(&s) {
-            emitted.push(Instr::Raw(format!("    mov rax, {t}")));
+        if let Some(&t) = tmp_of.get(&s) {
+            emitted.push(Instr::RegMove {
+                dst: "rax".to_string(),
+                src: t.to_string(),
+            });
         } else {
-            emitted.push(Instr::Raw(format!("    mov rax, {}", mem_rbp(s))));
+            emitted.push(Instr::LoadCell {
+                dst: "rax".to_string(),
+                disp: s,
+            });
         }
     }
     if net_delta != 0 {
         emitted.push(Instr::AdjustDsp(net_delta));
     }
     Some(emitted)
+}
+
+/// Read-only hot-cell promotion (the "registers for hot values, no spills" pass).
+/// Within an rbp-stable run, a data-stack cell that is read >= 2 times and never
+/// written is loaded into a reserved register ONCE and every read is rewritten to
+/// use it. No write-back and no liveness analysis: the cell's memory home is
+/// never touched, so the register is purely a read cache that dies at the run's
+/// end. The reserved pool (`r10`, `r11`) is disjoint from fusion's scratch, so
+/// the two never collide; when it's exhausted we simply stop promoting.
+///
+/// Sound because a run has no `Raw` (no opaque aliasing) and no `AdjustDsp` (rbp
+/// is fixed, so each `[rbp+disp]` is one stable cell); a read-only cell's value
+/// is therefore constant across the run, and its memory copy stays authoritative.
+fn promote_hot_cells(instrs: Vec<Instr>) -> Vec<Instr> {
+    const PROMO_POOL: [&str; 2] = ["r10", "r11"];
+    let mut out: Vec<Instr> = Vec::with_capacity(instrs.len());
+    let mut i = 0;
+    while i < instrs.len() {
+        if matches!(instrs[i], Instr::Raw(_) | Instr::AdjustDsp(_)) {
+            out.push(instrs[i].clone());
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < instrs.len() && !matches!(instrs[i], Instr::Raw(_) | Instr::AdjustDsp(_)) {
+            i += 1;
+        }
+        out.extend(promote_run(&instrs[start..i], &PROMO_POOL));
+    }
+    out
+}
+
+/// Promote read-only, multiply-read cells in one rbp-stable run to the reserved
+/// registers; returns the run unchanged when there is nothing worth promoting.
+fn promote_run(run: &[Instr], pool: &[&str]) -> Vec<Instr> {
+    use std::collections::HashMap;
+    let mut reads: HashMap<i64, usize> = HashMap::new();
+    let mut writes: HashMap<i64, usize> = HashMap::new();
+    for ins in run {
+        match ins {
+            Instr::LoadCell { disp, .. } => *reads.entry(*disp).or_insert(0) += 1,
+            Instr::StoreCell { disp, .. } => *writes.entry(*disp).or_insert(0) += 1,
+            Instr::CellAlu {
+                disp, cell_is_dest, ..
+            } => {
+                *reads.entry(*disp).or_insert(0) += 1;
+                if *cell_is_dest {
+                    *writes.entry(*disp).or_insert(0) += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    // candidates: read >= 2 times, never written -> read-only with a clear home
+    let mut cands: Vec<i64> = reads
+        .iter()
+        .filter(|(d, &c)| c >= 2 && *writes.get(d).unwrap_or(&0) == 0)
+        .map(|(d, _)| *d)
+        .collect();
+    if cands.is_empty() {
+        return run.to_vec();
+    }
+    cands.sort_by(|a, b| reads[b].cmp(&reads[a]).then(a.cmp(b))); // hottest first
+    cands.truncate(pool.len()); // out of registers -> stop promoting the rest
+    let reg_of: HashMap<i64, &str> = cands
+        .iter()
+        .enumerate()
+        .map(|(idx, d)| (*d, pool[idx]))
+        .collect();
+
+    let mut out: Vec<Instr> = Vec::with_capacity(run.len() + cands.len());
+    // load each promoted cell once, up front (rbp is fixed; value is constant)
+    for d in &cands {
+        out.push(Instr::LoadCell {
+            dst: reg_of[d].to_string(),
+            disp: *d,
+        });
+    }
+    for ins in run {
+        match ins {
+            Instr::LoadCell { dst, disp } if reg_of.contains_key(disp) => {
+                out.push(Instr::RegMove {
+                    dst: dst.clone(),
+                    src: reg_of[disp].to_string(),
+                });
+            }
+            Instr::CellAlu {
+                mnem,
+                reg,
+                disp,
+                cell_is_dest: false,
+            } if reg_of.contains_key(disp) => {
+                out.push(Instr::Raw(format!("    {mnem} {reg}, {}", reg_of[disp])));
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
 }
 
 /// True when every token is in the Phase 0 deferrable subset (`Lit`/`Inline`) —
@@ -1453,9 +1576,9 @@ pub fn compile_body_bytes(tokens: &[Token]) -> Result<Vec<u8>, CompileError> {
     }
     let asm = compile_definition(tokens, "wf66_body").map_err(CompileError::Lower)?;
     // Deferred assembly: lex to instruction records, reduce, re-render.
-    // coalesce rbp adjusts first (absolute disps), then fuse each window to its
-    // minimal parallel-move (auto-pick instead of replaying stack ops).
-    let asm = render(&window_fuse(coalesce_dsp(parse_instrs(&asm))));
+    // coalesce rbp adjusts (absolute disps) -> fuse each window to its minimal
+    // parallel-move (auto-pick) -> promote read-only hot cells to registers.
+    let asm = render(&promote_hot_cells(window_fuse(coalesce_dsp(parse_instrs(&asm)))));
     let module = wfasm::rasm::assemble(&asm).map_err(|e| CompileError::Assemble(format!("{e:#}")))?;
     let fn_off = *module
         .symbols
@@ -2045,6 +2168,45 @@ mod tests {
         // regress the already-minimal permutation realizer.
         let rr = fused(&[Token::Stack(Rot), Token::Stack(Rot)]);
         assert_eq!(mem_accesses(&rr), 4);
+    }
+
+    #[test]
+    fn promote_caches_a_read_only_multiply_read_cell() {
+        // `2 pick + 2 pick +` reads the same deep cell twice, once in each of two
+        // fusion windows split by the `+` (a Fop), and never writes it. Fusion's
+        // per-window pass can't see across the Fop; the block-level promoter loads
+        // the cell once into a reserved register and reuses it, cutting reads.
+        let toks = vec![
+            Token::Pick(2),
+            Token::Inline(Fop::Add),
+            Token::Pick(2),
+            Token::Inline(Fop::Add),
+        ];
+        let asm = lower(&reduce(&toks), "t").unwrap();
+        let fused = window_fuse(coalesce_dsp(parse_instrs(&asm)));
+        let promoted = promote_hot_cells(fused.clone());
+        let before = render(&fused).matches(", [rbp").count();
+        let after = render(&promoted).matches(", [rbp").count();
+        assert!(
+            after < before,
+            "promotion should cut memory reads: {before} -> {after}\n{}",
+            render(&promoted)
+        );
+        assert!(
+            render(&promoted).contains("r10"),
+            "a reserved register should be used:\n{}",
+            render(&promoted)
+        );
+        assert!(wfasm::rasm::assemble(&render(&promoted)).is_ok());
+    }
+
+    #[test]
+    fn promote_leaves_written_cells_alone() {
+        // A cell that is written must NOT be promoted (read-only only): `swap`
+        // writes its cells, so promotion is a no-op here.
+        let asm = lower(&[Token::Stack(StackOp::Swap)], "t").unwrap();
+        let fused = window_fuse(coalesce_dsp(parse_instrs(&asm)));
+        assert_eq!(promote_hot_cells(fused.clone()), fused);
     }
 
     #[test]
