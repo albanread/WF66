@@ -1944,6 +1944,18 @@ impl Wf64Session {
         session.write_user_u64(USER_WF66_VOC_FOVER, wf66_fover);
         session.write_user_u64(USER_WF66_VOC_FFETCH, wf66_ffetch);
         session.write_user_u64(USER_WF66_VOC_FSTORE, wf66_fstore);
+        // F2: libm math words are reached via a settle-barrier call (not a taint),
+        // so FP code that calls them still optimizes. They are self-contained STC
+        // words that preserve every Forth invariant.
+        for sym in [
+            "fsqrt_word", "fsin_word", "fcos_word", "ftan_word", "fexp_word",
+            "fln_word", "flog_word", "fatan_word", "fasin_word", "facos_word",
+            "f_pow_word", "fatan2_word",
+        ] {
+            if let Ok(addr) = session.jit.lookup_addr(sym) {
+                crate::runtime::wf66_register_call(addr);
+            }
+        }
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {

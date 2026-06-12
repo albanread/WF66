@@ -878,6 +878,23 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+// F2: xts of words reachable via a SETTLE-BARRIER CALL instead of tainting the
+// caller — the libm math words (fsqrt fsin ...). GLOBAL, not thread-local: it is
+// populated once at session boot but read while compiling, which can be a
+// different thread (the IDE worker, or the shared test session). They are stable
+// kernel addresses, so a process-wide set is correct; calling them with the
+// stacks settled is sound (they preserve every Forth invariant).
+static WF66_CALL: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// Register an xt as reachable via a WF66 settle-barrier call (boot).
+pub fn wf66_register_call(xt: u64) {
+    if let Ok(mut v) = WF66_CALL.lock() {
+        if !v.contains(&xt) {
+            v.push(xt);
+        }
+    }
+}
+
 /// Max token-body size eligible for inlining (larger callees stay calls, i.e.
 /// taint the caller until the cross-word ABI lands in Phase 4).
 const WF66_INLINE_MAX: usize = 16;
@@ -1117,6 +1134,11 @@ pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
                 eprintln!("[wf66] word xt={xt:#x} -> INLINE {} tokens", toks.len());
             }
             b.splice(&toks);
+        } else if WF66_CALL.lock().map(|v| v.contains(&xt)).unwrap_or(false) {
+            if wf66_dbg() {
+                eprintln!("[wf66] word xt={xt:#x} -> CALL (settle-barrier)");
+            }
+            b.call(xt);
         } else {
             if wf66_dbg() {
                 eprintln!("[wf66] word xt={xt:#x} -> TAINT");

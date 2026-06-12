@@ -518,6 +518,13 @@ pub enum Token {
     FpStack(FpStackOp),
     /// An FP memory access (`f@ f!`): data-stack address, FP-stack value.
     FpMem(FpMemOp),
+    /// A settle-barrier call to a known word at absolute address `xt` (F2). The
+    /// stacks are settled to canonical before the call (TOS in rax, FTOS in
+    /// xmm15, DSP/FSP in memory), so the callee — which preserves every Forth
+    /// invariant — runs exactly as under eager; the optimizer keeps optimizing
+    /// the windows around it. Used for libm math words (`fsqrt fsin ...`) so FP
+    /// code that calls them still optimizes. Needs no stack-effect analysis.
+    Call(u64),
     /// A non-inlined call to another word by absolute xt. A settle-to-canonical
     /// boundary; lowering is a later sprint.
     Word { xt: u64 },
@@ -582,6 +589,10 @@ impl IrBuilder {
 
     pub fn fp_mem(&mut self, op: FpMemOp) {
         self.tokens.push(Token::FpMem(op));
+    }
+
+    pub fn call(&mut self, xt: u64) {
+        self.tokens.push(Token::Call(xt));
     }
 
     /// Splice a callee's token body into the current definition (Phase 3
@@ -843,6 +854,14 @@ pub fn lower(tokens: &[Token], fn_name: &str) -> Result<String, LowerError> {
             }
             Token::FpStack(op) => op.emit(&mut s),
             Token::FpMem(op) => op.emit(&mut s),
+            // Settle-barrier call: at this point the data + FP stacks are settled
+            // to canonical (the call is a Raw barrier, so coalesce flushed the
+            // rbp adjust, TOS is in rax, FTOS in xmm15, FSP in memory). Call the
+            // word absolutely (position-independent target) via a scratch reg.
+            Token::Call(xt) => {
+                s.push_str(&format!("    movabs rcx, {xt}\n"));
+                s.push_str("    call rcx\n");
+            }
             Token::PickWord | Token::Word { .. } | Token::Opaque => {
                 return Err(LowerError::Unsupported(t))
             }
@@ -1700,6 +1719,7 @@ pub fn is_deferrable(tokens: &[Token]) -> bool {
                 | Token::FpNeg
                 | Token::FpStack(_)
                 | Token::FpMem(_)
+                | Token::Call(_)
         )
     })
 }
@@ -2554,6 +2574,33 @@ mod tests {
                 bytes.err()
             );
         }
+    }
+
+    #[test]
+    fn fp_settle_barrier_call_compiles() {
+        use FpOp::*;
+        use FpStackOp::*;
+        // FP arithmetic followed by a settle-barrier call (like `... fsqrt`):
+        // must be deferrable and assemble to a `movabs rcx, addr ; call rcx`.
+        let toks = [
+            Token::FpStack(FDup),
+            Token::FpBin(Mul),
+            Token::FpStack(FSwap),
+            Token::FpStack(FDup),
+            Token::FpBin(Mul),
+            Token::FpBin(Add),
+            Token::Call(0x2573_6920_0000),
+        ];
+        assert!(is_deferrable(&toks));
+        let asm = lower(&toks, "rt").unwrap();
+        assert!(asm.contains("movabs rcx, 41177615171584"));
+        assert!(asm.contains("call rcx"));
+        let bytes = compile_body_bytes(&toks);
+        assert!(
+            matches!(&bytes, Ok(v) if !v.is_empty()),
+            "Call body failed to assemble: {:?}",
+            bytes.err()
+        );
     }
 
     #[test]

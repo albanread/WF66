@@ -1871,6 +1871,59 @@ fn wf66_fp_word_is_actually_optimized() {
 }
 
 #[test]
+fn wf66_fp_math_calls_match_eager() {
+    // libm math words reached via a settle-barrier call (F2): a leaf word that
+    // does FP arithmetic AND calls fsqrt/fsin/... must WF66-compile (no taint)
+    // and match the eager kernel.
+    let cases: &[(&str, &str)] = &[
+        (": froot fsqrt ;", "16e froot f. cr"),
+        (": myhyp fdup f* fswap fdup f* f+ fsqrt ;", "3e 4e myhyp f. cr"),
+        (": fsc fdup fsin fswap fcos f* ;", "1e fsc f. cr"),
+        (": fpow f** ;", "2e 10e fpow f. cr"),
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}\nbye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
+fn wf66_fp_math_word_is_optimized() {
+    // A word mixing FP arithmetic and an fsqrt call must be WF66-compiled (the
+    // settle-barrier call replaces the taint), not fall back to eager.
+    fn body(s: &Wf64Session, name: &str) -> Vec<u8> {
+        let (a, b) = s
+            .debug_words()
+            .into_iter()
+            .find_map(|(n, a, b)| if n == name { Some((a, b)) } else { None })
+            .unwrap();
+        unsafe { std::slice::from_raw_parts(a as *const u8, (b - a) as usize).to_vec() }
+    }
+    let src = ": myhyp fdup f* fswap fdup f* f+ fsqrt ;\nbye\n";
+    let eager = {
+        let mut s = sess();
+        s.eval(src).unwrap();
+        body(&s, "myhyp")
+    };
+    let wf66 = {
+        let mut s = sess();
+        s.set_wf66_enabled(true);
+        s.eval(src).unwrap();
+        body(&s, "myhyp")
+    };
+    assert_ne!(eager, wf66, "myhyp should be WF66-compiled (FP + settle-barrier call)");
+}
+
+#[test]
 fn load_source_file_provides_defer_defining_word() {
     let mut s = sess();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join("core.f");
