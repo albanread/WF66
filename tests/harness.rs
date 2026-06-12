@@ -7512,3 +7512,28 @@ fn pin_plus_store_and_invariant_matches_unpinned() {
     assert!(pinned.contains("100"), "got: {pinned:?}");
 }
 
+
+#[test]
+fn agents_round_robin() {
+    // Step 1 proof: two cooperative agents (Win32-fiber green threads) interleave
+    // via pause/(switch-to). Each emits its letter 3 times, yielding between, and
+    // the operator round-robins them -> output must interleave "ABABAB".
+    let prog = "\
+(agent-init) drop\n\
+: yield  0 (switch-to) ;\n\
+: tA  3 0 do  65 emit  yield  loop ;\n\
+: tB  3 0 do  66 emit  yield  loop ;\n\
+' tA (spawn) value a\n\
+' tB (spawn) value b\n\
+: run\n\
+   begin  a (agent-done?)  b (agent-done?)  and  0=  while\n\
+     a (agent-done?) 0= if  a (switch-to)  then\n\
+     b (agent-done?) 0= if  b (switch-to)  then\n\
+   repeat ;\n\
+run\n\
+bye\n";
+    let mut s = sess();
+    let out = s.eval(prog).unwrap();
+    let letters: String = out.chars().filter(|c| *c == 'A' || *c == 'B').collect();
+    assert_eq!(letters, "ABABAB", "expected interleave; got out={out:?}");
+}

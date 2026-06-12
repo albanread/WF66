@@ -25,6 +25,7 @@
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
+pub mod agents;
 pub mod runtime;
 pub mod wf32_port;
 
@@ -532,6 +533,12 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("locals#!",       "locals_count_store_word", 0),
     ("check-local-emit", "check_local_emit_word",  0),
     ("check-local-store","check_local_store_word", 0),
+    // Cooperative agents (green threads) — see kernel/agents.masm
+    ("(agent-init)",   "agent_init_word",         0),
+    ("(spawn)",        "agent_spawn_word",        0),
+    ("(switch-to)",    "agent_switch_word",       0),
+    ("(agent-done?)",  "agent_done_q_word",       0),
+    ("(agent-self)",   "agent_self_word",         0),
     ("(inline,)",      "inline_comma_word",       0),
     ("(inline-var,)",  "inline_var_comp",         0),
     // Parse & dict
@@ -1466,6 +1473,12 @@ impl Wf64Session {
                 "rt_ir_local_ffetch" => Some(runtime::rt_ir_local_ffetch as *mut c_void),
                 "rt_ir_local_fstore" => Some(runtime::rt_ir_local_fstore as *mut c_void),
                 "rt_ir_flit"     => Some(runtime::rt_ir_flit       as *mut c_void),
+                "rt_agent_init"     => Some(crate::agents::rt_agent_init    as *mut c_void),
+                "rt_agent_spawn"    => Some(crate::agents::rt_agent_spawn   as *mut c_void),
+                "rt_agent_switch"   => Some(crate::agents::rt_agent_switch  as *mut c_void),
+                "rt_agent_done"     => Some(crate::agents::rt_agent_done    as *mut c_void),
+                "rt_agent_is_done"  => Some(crate::agents::rt_agent_is_done as *mut c_void),
+                "rt_agent_self"     => Some(crate::agents::rt_agent_self    as *mut c_void),
                 "rt_ir_open_locals" => Some(runtime::rt_ir_open_locals as *mut c_void),
                 "rt_pin_analyze" => Some(runtime::rt_pin_analyze  as *mut c_void),
                 "rt_pin_rewrite" => Some(runtime::rt_pin_rewrite  as *mut c_void),
@@ -1989,6 +2002,12 @@ impl Wf64Session {
         }
         session.write_user_u64(USER_WF66_ENABLE, 0);
         session.write_user_u64(USER_WF66_REC, 0);
+        // Cooperative agents: hand the runtime the trampoline address + the shared
+        // user-area base (process-globals; the per-thread fiber table is built
+        // lazily by (agent-init) on the scheduler thread).
+        if let Ok(tramp) = session.jit.lookup_addr("agent_trampoline") {
+            crate::agents::set_globals(tramp, session.user_base);
+        }
         if std::env::var_os("WF64_PIN_DEBUG").is_some() {
             session.write_user_u64(USER_PIN_DEBUG, 1);
         }

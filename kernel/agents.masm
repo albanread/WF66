@@ -1,0 +1,75 @@
+; WF66 cooperative agents — kernel side (step 1).
+;
+; Green-thread substrate: each agent is a Win32 fiber (managed Rust-side in
+; src/agents.rs) with its own data/locals stacks. Fibers preserve the native
+; return stack + the non-volatile registers (RBP=DSP, R15=LP, XMM15=FTOS, RBX=UP)
+; across a switch automatically; we save/restore TOS (RAX, volatile) by hand.
+;
+; Step 1 scope: spawn / switch / done / init + the trampoline, enough to prove
+; round-robin in pure Forth. FSP/HANDLER swapping, per-agent catch frames, and
+; mailboxes come next. Step-1 agents therefore must not use the FP stack or
+; uncaught THROW. See docs/design/wf66_agents.md.
+
+; agent_trampoline — the fiber start routine. Win32 passes the fiber parameter
+; (a pointer to [up, ds_top, ls_top, entry_xt]) in RCX. Install the agent's Forth
+; registers, run its entry word, and on return report completion (never returns).
+proc(agent_trampoline)
+    mov     rbx, [rcx + 0]                  ; UP (one shared user area)
+    mov     rbp, [rcx + 8]                  ; DSP = data-stack top (grows down)
+    mov     r15, [rcx + 16]                 ; R15 = locals-stack top
+    mov     rdx, [rcx + 24]                 ; entry xt
+    xor     rax, rax                        ; TOS empty
+    call    rdx                             ; run the agent's word
+    ; entry returned -> agent is done; switch back to the operator.
+    win64_call(rt_agent_done)
+.spin:
+    jmp     .spin                           ; unreachable
+endp()
+
+; (agent-init)  ( -- aid )
+;     Convert this thread to the operator fiber and reset the agent table. Run
+;     once on the scheduler thread before any spawn/switch. Returns 0 (operator).
+proc(agent_init_word)
+    mov     [rbp - cell], rax               ; spill old TOS
+    win64_call(rt_agent_init)               ; rax = 0 (operator aid)
+    sub     rbp, cell                       ; commit the push
+    next()
+endp()
+
+; (spawn)  ( entry-xt -- aid )
+;     Create an agent fiber that runs entry-xt; returns its id.
+proc(agent_spawn_word)
+    mov     rcx, rax                        ; arg1 = entry xt
+    win64_call(rt_agent_spawn)              ; rax = aid
+    next()
+endp()
+
+; (switch-to)  ( aid -- )
+;     Cooperatively switch to agent aid (0 = operator). No-op if it has finished.
+;     Saves/restores TOS around the fiber switch (on this fiber's return stack, so
+;     it is preserved across suspend/resume); RBP/R15/XMM15/RBX are non-volatile
+;     and preserved by the fiber switch itself.
+proc(agent_switch_word)
+    mov     rcx, rax                        ; arg1 = aid
+    mov     rax, [rbp]                      ; drop aid: raise NOS into TOS
+    add     rbp, cell
+    push    rax                             ; save TOS across the switch
+    win64_call(rt_agent_switch)
+    pop     rax                             ; restore TOS on resume
+    next()
+endp()
+
+; (agent-done?)  ( aid -- flag )   -1 if finished or unknown
+proc(agent_done_q_word)
+    mov     rcx, rax
+    win64_call(rt_agent_is_done)            ; rax = flag
+    next()
+endp()
+
+; (agent-self)  ( -- aid )
+proc(agent_self_word)
+    mov     [rbp - cell], rax
+    win64_call(rt_agent_self)
+    sub     rbp, cell
+    next()
+endp()

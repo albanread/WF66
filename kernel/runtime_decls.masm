@@ -41,6 +41,13 @@
 @extern rt_ir_local_ffetch(2)   ; (UP, offset) WF66: record a float-local fetch
 @extern rt_ir_local_fstore(2)   ; (UP, offset) WF66: record a float-local store
 @extern rt_ir_flit(2)           ; (UP, bits) WF66: record a float literal push
+; Cooperative agents (green threads) — see kernel/agents.masm, src/agents.rs
+@extern rt_agent_init(0)        ; ( -- aid ) convert thread to operator fiber
+@extern rt_agent_spawn(1)       ; (xt -- aid) create an agent fiber
+@extern rt_agent_switch(1)      ; (aid -- ) cooperative fiber switch
+@extern rt_agent_done(0)        ; ( -- ) trampoline: mark current done, to operator
+@extern rt_agent_is_done(1)     ; (aid -- flag) -1 if finished/unknown
+@extern rt_agent_self(0)        ; ( -- aid ) running agent's id
 @extern rt_ir_open_locals(3)    ; (UP, n_total, n_init) WF66: record the `{:` prologue
 @extern rt_slurp_file(2)        ; read file at (addr,len) into Rust Vec, return content ptr or 0
 @extern rt_slurp_len(0)         ; return byte length of top slurped file

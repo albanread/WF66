@@ -61,6 +61,7 @@
 @include "strings_managed.masm"
 @include "igui.masm"
 @include "igui_gfx.masm"
+@include "agents.masm"
 @include "interp.masm"
 
 ; forth_main(target_xt, logical_dsp_in, rsp_top, user_base)
