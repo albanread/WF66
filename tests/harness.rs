@@ -2002,18 +2002,49 @@ fvariable zr  fvariable zi  fvariable cre  fvariable cim\n\
         s.eval(&prog).unwrap();
         t.elapsed().as_micros()
     }
+    // Locals variant: loop-carried state in float LOCALS, the whole loop in one
+    // word. The begin/until taints (loops aren't deferrable), so this is eager
+    // either way -- the point is to compare locals-in-memory vs fvariables, and to
+    // be the substrate the register-promotion step will run on.
+    let setup_locals = "\
+fvariable cre  fvariable cim\n\
+: brotl  {: n | float zx float zy float nzx :}\n\
+    0e to zx  0e to zy\n\
+    n 0 do\n\
+        zx zx f*  zy zy f*  f-  cre f@ f+  to nzx\n\
+        zx zy f*  2e f*  cim f@ f+  to zy\n\
+        nzx to zx\n\
+    loop  zx ;\n\
+0.285e cre f!  0.01e cim f!\n";
+    fn run_locals(wf66: bool, setup: &str, n: u64) -> u128 {
+        let mut s = sess();
+        if wf66 {
+            s.set_wf66_enabled(true);
+        }
+        s.eval(setup).unwrap();
+        s.eval("200000 brotl\n").unwrap(); // warmup
+        let prog = format!("{n} brotl\n");
+        let t = std::time::Instant::now();
+        s.eval(&prog).unwrap();
+        t.elapsed().as_micros()
+    }
+
     let n = 5_000_000;
     let (off, _) = run_bench(false, setup, n);
     let (on, _) = run_bench(true, setup, n);
+    let loc = run_locals(true, setup_locals, n); // WF66 on, but the loop taints -> eager
     let masm = run_masm(n);
     eprintln!("\n  Mandelbrot inner loop, {n} iters (z = z^2 + c):");
-    eprintln!("    Forth, optimizer OFF: {off:>8} us");
+    eprintln!("    Forth fvariable, opt OFF: {off:>8} us");
     eprintln!(
-        "    Forth, optimizer ON : {on:>8} us   ({:.2}x faster than off)",
+        "    Forth fvariable, opt ON : {on:>8} us   ({:.2}x faster than off)",
         off as f64 / on as f64
     );
     eprintln!(
-        "    hand-rolled MASM     : {masm:>8} us   (regs across iters + escape test)",
+        "    Forth FLOAT LOCALS      : {loc:>8} us   (loop taints -> eager; state in R15 frame)"
+    );
+    eprintln!(
+        "    hand-rolled MASM        : {masm:>8} us   (regs across iters + escape test)",
     );
     eprintln!(
         "    => optimized Forth is {:.2}x the MASM time (MASM {:.2}x faster)",
@@ -2065,6 +2096,31 @@ fn wf66_locals_words_match_eager() {
             s.eval(&src).unwrap()
         };
         assert_eq!(eager, wf66, "WF66 != eager for `{def}` / `{run}`");
+    }
+}
+
+#[test]
+fn wf66_to_local_in_loop_matches_eager() {
+    // `to local` inside a do-loop: regression for two bugs in `to` -- a bitwise
+    // `state @ locals# and` (broke even local counts) and a leftover `( c-addr u )`
+    // on the local-match path (corrupted the control stack inside a loop -> -22).
+    let cases: &[(&str, &str)] = &[
+        (": s1 {: | n :} 0 to n  5 0 do n 1+ to n loop n ;", "s1 .\n"),       // 5
+        (": s2 {: a b :} 0 to a  b 0 do a 2 + to a loop a ;", "0 4 s2 .\n"),  // 8 (even count)
+        (": s3 {: | float x :} 0e to x  3 0 do x 1e f+ to x loop x ;", "s3 f.\n"), // 3.0
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}bye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for `to`-in-loop `{def}` / `{run}`");
     }
 }
 

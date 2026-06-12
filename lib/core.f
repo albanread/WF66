@@ -149,8 +149,10 @@ forth-wordlist set-current
     parse-name
     state @ if  locals# if           \ compiling, with active locals? (logical AND --
         2dup check-local-store       \ `state @ locals# and` is BITWISE: STATE=1, so
-        if exit then                 \ 1 and 2 = 0 skipped the local store for an even
-    then then                        \ local count.) found: inline mov emitted; done
+        if 2drop exit then           \ 1 and 2 = 0 skipped the local store for an even
+    then then                        \ local count.) found: drop the parsed name (the
+                                     \ 2dup copy was consumed) and stop -- leaving it
+                                     \ corrupts the control stack inside a do/begin loop.
     (wf66-taint)                     \ value/ivar store bypasses the recorder -> taint
     find-name dup 0= if drop throw_namereqd throw then
     drop                             ( nt )

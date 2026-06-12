@@ -117,23 +117,40 @@ shuffle chains −8; never larger than eager on the bench corpus.
 
 ## A benchmark, and what it says about scope
 
-A pure-Forth Mandelbrot inner loop (`z = z² + c` over fvariables, 5M iterations,
+A pure-Forth Mandelbrot inner loop (`z = z² + c`, 5M iterations,
 `wf66_mandel_inner_bench`):
 
 ```
-Forth, optimizer OFF:  ~149 ms        (eager: per-op kernel calls + FP-stack traffic)
-Forth, optimizer ON :   ~41 ms        (3.6× faster than off)
-hand-rolled MASM    :   ~15 ms        (loop state in xmm registers, all in one word)
+Forth fvariable, opt OFF:  ~164 ms    (eager: iter as a called leaf + FP-stack traffic)
+Forth fvariable, opt ON :   ~42 ms    (3.9× faster — optimized leaf, eager loop)
+Forth FLOAT LOCALS      :  ~128 ms    (one word, no per-iter call; eager — see below)
+hand-rolled MASM        :   ~16 ms    (loop state in xmm registers, all in one word)
 ```
 
 So the optimizer recovers about **three-quarters of the hand-tuning gap**
-automatically (eager is ~9.6× slower than MASM; optimized Forth is ~2.7×).
+automatically (eager is ~3.9× slower than optimized; optimized Forth is ~2.6× off
+MASM).
 
-The residual 2.7× is one thing: **loop-carried register residency.** The MASM
-keeps `zx`/`zy`/count in registers *across iterations*; WF66 keeps `zr`/`zi` in
-fvariables (memory) and the counter on the data stack, settling them at the loop
-back-edge. (The MASM even runs an escape test WF66 omits and is *still* faster —
-the win is register-vs-memory for the loop state, not the arithmetic.)
+The **float-locals** row is the instructive one. Rewriting the loop with the
+state in float *locals* (one word, no per-iteration call) beats the naive
+fvariable-eager version (128 vs 164 ms) — but it's **3× slower than the optimized
+fvariable** (128 vs 42 ms), because a loop taints (and float-local capture isn't
+wired), so the locals version runs *eager*, with every `zx`/`zy` access going
+through the FP stack and the `R15` frame — memory. **Locals-in-memory don't make
+it fast; the win is registers.** The locals work is the *substrate* the
+register step runs on, not the speedup itself.
+
+The residual 2.6× is one thing: **loop-carried register residency.** The MASM
+keeps `zx`/`zy`/count in registers *across iterations*; WF66 keeps them in
+fvariables (or a locals frame) — memory — and settles at the loop back-edge.
+(The MASM even runs an escape test WF66 omits and is *still* faster — the win is
+register-vs-memory for the loop state, not the arithmetic.)
+
+None of this is Mandelbrot-specific tuning: every optimization keys off a
+structural *pattern* (a leaf word, an unaliasable local, a call-free loop), and
+Mandelbrot is just the yardstick — the canonical shape of the hot 10% (a leaf
+loop with mutable FP loop-carried state). We optimize *to that shape*, not to the
+program.
 
 **This frames the scope deliberately.** The hand-MASM isn't doing whole-program
 magic, and it isn't a privilege the MASM has and a compiler doesn't: it keeps
