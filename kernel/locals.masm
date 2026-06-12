@@ -194,10 +194,14 @@ proc(check_local_emit_word)
     jmp     .cmp_loop
 
 .matched:
-    ; Read the byte-offset and emit the inline fetch at HERE.
-    mov     rdx, [rax + 16]
+    ; Read the byte-offset and type, emit the inline fetch at HERE.
+    mov     rdx, [rax + 16]                     ; byte offset within frame
+    mov     r11, [rax + 24]                     ; type: 0 = int, nonzero = float
     mov     rdi, [UP + user_HERE]
+    test    r11, r11
+    jnz     .matched_fp
 
+    ; Integer local fetch (15 bytes): spill TOS to NOS, load slot into TOS.
     mov     byte ptr [rdi + 0], 0x48
     mov     byte ptr [rdi + 1], 0x89
     mov     byte ptr [rdi + 2], 0x45
@@ -216,11 +220,54 @@ proc(check_local_emit_word)
     ; WF66: record this inline local fetch so the optimizer sees it (it bypasses
     ; the convergence point). rdx still = byte offset; UP in rbx.
     cmp     qword ptr [UP + user_WF66_REC], 0
-    je      .lf_no_wf66
+    je      .matched_done
     mov     rcx, UP
     win64_call(rt_ir_local_fetch)
-.lf_no_wf66:
+    jmp     .matched_done
 
+.matched_fp:
+    ; Float local fetch (33 bytes): push [r15+off] onto the FP stack (FTOS=xmm15),
+    ; spilling the old FTOS to the FP stack. Mirrors f@ but from a frame slot and
+    ; with no data-stack change. Byte encodings verified against the assembler.
+    ;   48 8B 93 <FSP>     mov rdx,[rbx+user_FSP]
+    ;   F2 44 0F 11 7A F8  movsd [rdx-8],xmm15      (spill FTOS to FNOS)
+    ;   48 83 EA 08        sub rdx,8
+    ;   48 89 93 <FSP>     mov [rbx+user_FSP],rdx
+    ;   F2 45 0F 10 BF d32 movsd xmm15,[r15+off]    (FTOS := slot)
+    mov     byte ptr [rdi + 0], 0x48
+    mov     byte ptr [rdi + 1], 0x8B
+    mov     byte ptr [rdi + 2], 0x93
+    mov     dword ptr [rdi + 3], user_FSP
+    mov     byte ptr [rdi + 7], 0xF2
+    mov     byte ptr [rdi + 8], 0x44
+    mov     byte ptr [rdi + 9], 0x0F
+    mov     byte ptr [rdi + 10], 0x11
+    mov     byte ptr [rdi + 11], 0x7A
+    mov     byte ptr [rdi + 12], 0xF8
+    mov     byte ptr [rdi + 13], 0x48
+    mov     byte ptr [rdi + 14], 0x83
+    mov     byte ptr [rdi + 15], 0xEA
+    mov     byte ptr [rdi + 16], 0x08
+    mov     byte ptr [rdi + 17], 0x48
+    mov     byte ptr [rdi + 18], 0x89
+    mov     byte ptr [rdi + 19], 0x93
+    mov     dword ptr [rdi + 20], user_FSP
+    mov     byte ptr [rdi + 24], 0xF2
+    mov     byte ptr [rdi + 25], 0x45
+    mov     byte ptr [rdi + 26], 0x0F
+    mov     byte ptr [rdi + 27], 0x10
+    mov     byte ptr [rdi + 28], 0xBF
+    mov     dword ptr [rdi + 29], edx
+    add     rdi, 33
+    mov     [UP + user_HERE], rdi
+    ; WF66: float-local fetch isn't captured yet, so taint the span -> the word
+    ; falls back to the (correct) eager body under WF66. (Proper capture next.)
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .matched_done
+    mov     rcx, UP
+    win64_call(rt_ir_taint)
+
+.matched_done:
     ; ( c-addr u -- -1 )
     mov     TOS, -1
     stk(2, 1)
@@ -285,10 +332,14 @@ proc(check_local_store_word)
     jmp     .cmp_loop
 
 .matched:
-    ; Read the byte-offset and emit the inline store at HERE.
-    mov     rdx, [rax + 16]
+    ; Read the byte-offset and type, emit the inline store at HERE.
+    mov     rdx, [rax + 16]                     ; byte offset within frame
+    mov     r11, [rax + 24]                     ; type: 0 = int, nonzero = float
     mov     rdi, [UP + user_HERE]
+    test    r11, r11
+    jnz     .matched_fp
 
+    ; Integer local store (15 bytes): slot := TOS, raise NOS into TOS, drop.
     ; 49 89 87 <disp32>  mov [r15+disp32], rax  (7 bytes)
     mov     byte ptr [rdi + 0], 0x49
     mov     byte ptr [rdi + 1], 0x89
@@ -310,11 +361,52 @@ proc(check_local_store_word)
     ; WF66: record this inline `to local` store so the optimizer sees it (it
     ; bypasses the convergence point). rdx still = byte offset; UP in rbx.
     cmp     qword ptr [UP + user_WF66_REC], 0
-    je      .ls_no_wf66
+    je      .matched_done
     mov     rcx, UP
     win64_call(rt_ir_local_store)
-.ls_no_wf66:
+    jmp     .matched_done
 
+.matched_fp:
+    ; Float local store (32 bytes): slot := FTOS, pop the FP stack. Mirrors f!
+    ; into a frame slot, no data-stack change. Encodings verified vs the assembler.
+    ;   F2 45 0F 11 BF d32 movsd [r15+off],xmm15
+    ;   48 8B 93 <FSP>     mov rdx,[rbx+user_FSP]
+    ;   F2 44 0F 10 3A     movsd xmm15,[rdx]        (reload FTOS from FNOS)
+    ;   48 83 C2 08        add rdx,8
+    ;   48 89 93 <FSP>     mov [rbx+user_FSP],rdx
+    mov     byte ptr [rdi + 0], 0xF2
+    mov     byte ptr [rdi + 1], 0x45
+    mov     byte ptr [rdi + 2], 0x0F
+    mov     byte ptr [rdi + 3], 0x11
+    mov     byte ptr [rdi + 4], 0xBF
+    mov     dword ptr [rdi + 5], edx
+    mov     byte ptr [rdi + 9], 0x48
+    mov     byte ptr [rdi + 10], 0x8B
+    mov     byte ptr [rdi + 11], 0x93
+    mov     dword ptr [rdi + 12], user_FSP
+    mov     byte ptr [rdi + 16], 0xF2
+    mov     byte ptr [rdi + 17], 0x44
+    mov     byte ptr [rdi + 18], 0x0F
+    mov     byte ptr [rdi + 19], 0x10
+    mov     byte ptr [rdi + 20], 0x3A
+    mov     byte ptr [rdi + 21], 0x48
+    mov     byte ptr [rdi + 22], 0x83
+    mov     byte ptr [rdi + 23], 0xC2
+    mov     byte ptr [rdi + 24], 0x08
+    mov     byte ptr [rdi + 25], 0x48
+    mov     byte ptr [rdi + 26], 0x89
+    mov     byte ptr [rdi + 27], 0x93
+    mov     dword ptr [rdi + 28], user_FSP
+    add     rdi, 32
+    mov     [UP + user_HERE], rdi
+    ; WF66: float-local store isn't captured yet, so taint the span -> the word
+    ; falls back to the (correct) eager body under WF66. (Proper capture next.)
+    cmp     qword ptr [UP + user_WF66_REC], 0
+    je      .matched_done
+    mov     rcx, UP
+    win64_call(rt_ir_taint)
+
+.matched_done:
     ; ( c-addr u -- -1 )
     mov     TOS, -1
     stk(2, 1)

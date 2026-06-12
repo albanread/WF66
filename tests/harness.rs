@@ -2069,6 +2069,31 @@ fn wf66_locals_words_match_eager() {
 }
 
 #[test]
+fn wf66_fp_locals_match_eager() {
+    // Float locals ({: | float x :}): `to x` is movsd slot<-xmm15, a reference is
+    // movsd xmm15<-slot. WF66 falls back to eager for now, so results must match.
+    let cases: &[(&str, &str)] = &[
+        (": sq {: | float x :} 3e to x  x x f* ;", "sq f.\n"),          // 9.0
+        (": cube {: | float x :} 2e to x  x x f* x f* ;", "cube f.\n"), // 8.0
+        (": mix {: n | float x :} 5e to x  x x f+ ;", "7 mix f.\n"),    // 10.0 (n unused in FP)
+        (": two {: | float a float b :} 3e to a  4e to b  a b f+ ;", "two f.\n"), // 7.0
+    ];
+    for (def, run) in cases {
+        let src = format!("{def}\n{run}bye\n");
+        let eager = {
+            let mut s = sess();
+            s.eval(&src).unwrap()
+        };
+        let wf66 = {
+            let mut s = sess();
+            s.set_wf66_enabled(true);
+            s.eval(&src).unwrap()
+        };
+        assert_eq!(eager, wf66, "WF66 != eager for FP-locals `{def}` / `{run}`");
+    }
+}
+
+#[test]
 fn wf66_locals_word_inlines_and_matches_eager() {
     // A WF66-optimized locals leaf word, called from another word, inlines as a
     // balanced nested frame (the user's challenge) -- result must match eager.
@@ -7396,3 +7421,4 @@ fn pin_plus_store_and_invariant_matches_unpinned() {
     assert_eq!(unpinned, pinned, "pinned != unpinned");
     assert!(pinned.contains("100"), "got: {pinned:?}");
 }
+

@@ -147,10 +147,10 @@ forth-wordlist set-current
 \ TO: parse next name; in interpret state store, in compile state compile a store.
 : to
     parse-name
-    state @ locals# and if          \ inside a compiled definition with active locals?
-        2dup check-local-store       \ try locals table first
-        if exit then                 \ found: inline mov emitted (WF66 captures it); done
-    then
+    state @ if  locals# if           \ compiling, with active locals? (logical AND --
+        2dup check-local-store       \ `state @ locals# and` is BITWISE: STATE=1, so
+        if exit then                 \ 1 and 2 = 0 skipped the local store for an even
+    then then                        \ local count.) found: inline mov emitted; done
     (wf66-taint)                     \ value/ivar store bypasses the recorder -> taint
     find-name dup 0= if drop throw_namereqd throw then
     drop                             ( nt )
@@ -458,6 +458,7 @@ private-wordlist set-current
 variable ls-idx
 variable ls-addr
 variable ls-len
+variable ls-float        \ -1 if the next local declared is a float (xmm), else 0
 
 \ Record a single local in the table.  Each slot is 32 bytes:
 \   +0       length (1 byte, capped at 15)
@@ -477,10 +478,16 @@ variable ls-len
     dup 16 erase
     ls-len @ over c!                            \ length byte
     1+  ls-addr @ swap  ls-len @ cmove          \ name bytes
-    ls-idx @ cells  ls-idx @ locals-slot 16 + ! ;  \ byte-offset
+    ls-idx @ cells  ls-idx @ locals-slot 16 + !    \ byte-offset  [+16]
+    ls-float @  ls-idx @ locals-slot 24 + !        \ type: 0=int, -1=float  [+24]
+    0 ls-float ! ;                                 \ consume the float marker
+
+\ Type of local idx: 0 = integer (rax/data stack), -1 = float (xmm15/FP stack).
+: local-type  ( idx -- t )  locals-slot 24 + @ ;
 
 : locals-closer?  ( c-addr u -- flag )  s" :}" str= ;
 : locals-pipe?    ( c-addr u -- flag )  1 = swap c@ [char] | = and ;
+: locals-float?   ( c-addr u -- flag )  s" float" str= ;
 : locals-arrow?   ( c-addr u -- flag )  s" --" str= ;
 : locals-skip-to-end ( -- )
     begin parse-name locals-closer? until ;
@@ -488,6 +495,7 @@ variable ls-len
 forth-wordlist set-current
 
 : {:
+    0 ls-float !                        \ clear stale float marker (int is default)
     0 0 0                               \ ( n-init after-pipe n-total )
     begin
         parse-name dup 0= if
@@ -502,6 +510,9 @@ forth-wordlist set-current
             else 2dup locals-arrow? if      \ -- starts output-comment; skip to :}
                 2drop locals-skip-to-end
                 true
+            else 2dup locals-float? if      \ `float` — next local is a float (xmm)
+                2drop  true ls-float !
+                false
             else
                 ( n-init after-pipe n-total c-addr u )
                 \ Overflow guard: 16 slots (idx 0..15) before user_TOOLS_WID.
@@ -514,7 +525,7 @@ forth-wordlist set-current
                     rot 1+ -rot
                 then
                 false
-            then then then
+            then then then then
         then
     until
     ( n-init after-pipe n-total )
