@@ -269,10 +269,43 @@ fn run_drain_loop(mut session: wf64::Wf64Session) {
 
 /// Handle one IGuiEvent on the worker thread. Returns false on FrameClose (the
 /// drain loop should exit). Extracted from the loop so the agent pump can call it.
+/// If `ev` is a per-pane GUI input event for a pane owned by an agent, decode it
+/// and route it to that agent's event queue (drained cooperatively via the Forth
+/// `pane-event` word). Returns true if routed — the pump then handles it no further,
+/// so one pane's input never blocks another. Falls through (false) for panes with no
+/// agent (the classic gpane-next-event demos read those by blocking instead).
+#[cfg(windows)]
+fn route_pane_event_to_agent(ev: &wf64::igui::channels::IGuiEvent) -> bool {
+    use wf64::igui::channels::IGuiEvent;
+    let child_id = match ev {
+        IGuiEvent::Key { child_id, .. }
+        | IGuiEvent::Char { child_id, .. }
+        | IGuiEvent::Mouse { child_id, .. }
+        | IGuiEvent::Focus { child_id, .. }
+        | IGuiEvent::Resize { child_id, .. }
+        | IGuiEvent::Close { child_id }
+        | IGuiEvent::DpiChange { child_id, .. }
+        | IGuiEvent::Tick { child_id, .. } => *child_id,
+        _ => return false,
+    };
+    if wf64::agents::agent_for_pane(child_id).is_none() {
+        return false;
+    }
+    let (kind, p1, p2, p3, p4) = wf64::runtime::decode_event(ev);
+    if kind == 0 {
+        return false; // EV_NONE (e.g. DpiChange) — the pane doesn't surface it
+    }
+    wf64::agents::route_pane_event(child_id, kind, p1, p2, p3, p4)
+}
+
 #[cfg(windows)]
 fn handle_worker_event(session: &mut wf64::Wf64Session, ev: wf64::igui::channels::IGuiEvent) -> bool {
     use wf64::igui::channels::IGuiEvent;
     use wf64::igui::fconsole;
+    // Per-pane input to a pane-agent is multiplexed to that agent's event queue.
+    if route_pane_event_to_agent(&ev) {
+        return true;
+    }
     {
         match ev {
             IGuiEvent::EvalBuffer { source } => {
@@ -338,13 +371,6 @@ fn handle_worker_event(session: &mut wf64::Wf64Session, ev: wf64::igui::channels
                 // The cross-thread half was the GUI thread's channels::push; this
                 // (post) half runs here on the worker, where the agent table lives.
                 wf64::agents::deliver_reply(request_id as u32, payload as u64);
-            }
-            IGuiEvent::Close { child_id } => {
-                // Route the pane's close to its controlling agent (if one is bound)
-                // so a pane-agent can `receive` it and exit cooperatively while the
-                // console stays live. No-op if no agent owns the pane (the classic
-                // gpane-next-event demos read Close directly while blocking instead).
-                wf64::agents::post_to_pane(child_id, wf64::runtime::EV_CLOSE as u64);
             }
             IGuiEvent::FrameClose => {
                 fconsole::append("∴ frame closing");

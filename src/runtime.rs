@@ -2788,7 +2788,7 @@ pub const EV_TICK:        i64 = 13;
 /// `EV_NONE` for variants Forth doesn't care about (e.g.
 /// `ForthRestart`).
 #[cfg(windows)]
-fn decode_event(
+pub fn decode_event(
     ev: &crate::igui::channels::IGuiEvent,
 ) -> (i64, i64, i64, i64, i64) {
     use crate::igui::channels::IGuiEvent;
@@ -2857,6 +2857,24 @@ pub extern "C" fn rt_gpane_next_event_for(
 
     #[cfg(windows)]
     {
+        // Agent path: when called from a pane-agent fiber, pop the agent's own
+        // routed event queue (cooperative, non-blocking — the host pump fed it via
+        // route_pane_event). child_id/timeout are ignored; the Forth `pane-event`
+        // word yields on empty so one pane never blocks another. See agents.rs.
+        if crate::agents::rt_agent_self() != 0 {
+            if let Some(ev) = crate::agents::pop_pane_event() {
+                unsafe {
+                    if !out_kind.is_null() { *out_kind = ev[0]; }
+                    if !out_p1.is_null()   { *out_p1   = ev[1]; }
+                    if !out_p2.is_null()   { *out_p2   = ev[2]; }
+                    if !out_p3.is_null()   { *out_p3   = ev[3]; }
+                    if !out_p4.is_null()   { *out_p4   = ev[4]; }
+                }
+                return 1;
+            }
+            return 0; // empty queue -> EV_NONE (outputs already zeroed)
+        }
+
         let id = child_id as i64;
         let timeout = timeout_ms as i64;
         // Loop on EV_NONE: an event variant we don't surface to

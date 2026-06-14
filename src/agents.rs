@@ -69,6 +69,11 @@ struct Slot {
     /// Per-agent output buffer (the pane transcript), drained by the host pump's
     /// flush step (`take_pane_output`). Only filled while `child_id >= 0`.
     out: Vec<u8>,
+    /// Per-agent GUI input event queue: decoded `[kind, p1, p2, p3, p4]` tuples the
+    /// host pump routes here for this pane (route_pane_event). The agent drains them
+    /// cooperatively via `pane-event` (rt_gpane_next_event_for's agent path). One
+    /// pane's events never block another pane.
+    events: VecDeque<[i64; 5]>,
     /// Backing storage for the agent's Forth stacks (kept alive; grows downward
     /// from the *_top addresses baked into `_ctx`). Empty for the operator.
     _ds: Vec<u64>,
@@ -157,6 +162,7 @@ pub extern "C" fn rt_agent_init() -> u64 {
             ready: false,
             child_id: -1, // operator is never a pane
             out: Vec::new(),
+            events: VecDeque::new(),
             _ds: Vec::new(),
             _ls: Vec::new(),
             _fp: Vec::new(),
@@ -195,6 +201,7 @@ pub extern "C" fn rt_agent_spawn(entry_xt: u64) -> u64 {
             ready: false,
             child_id: -1, // unbound until (set-pane); output uses the shared buffer
             out: Vec::new(),
+            events: VecDeque::new(),
             _ds: ds,
             _ls: ls,
             _fp: fp,
@@ -448,6 +455,48 @@ pub fn take_pane_output(child_id: i64) -> Option<Vec<u8>> {
 /// The `child_id` agent `aid` is bound to, or -1 if unbound/unknown.
 pub fn agent_pane(aid: u64) -> i64 {
     AGENTS.with(|a| a.borrow().get(aid as usize).map_or(-1, |s| s.child_id))
+}
+
+/// The aid of the live agent bound to pane `child_id`, or None. The host pump
+/// checks this to decide whether a per-pane GUI event should be routed to an agent.
+pub fn agent_for_pane(child_id: i64) -> Option<u64> {
+    if child_id < 0 {
+        return None;
+    }
+    AGENTS.with(|a| {
+        a.borrow()
+            .iter()
+            .position(|s| s.child_id == child_id && !s.done)
+            .map(|i| i as u64)
+    })
+}
+
+/// Route a decoded GUI input event `[kind, p1, p2, p3, p4]` to the agent bound to
+/// pane `child_id` (append to its event queue + make it runnable). Returns false
+/// if no live agent owns the pane. The agent drains it via `pane-event`. This is
+/// how the IDE multiplexes input to the right pane without blocking the others.
+pub fn route_pane_event(child_id: i64, kind: i64, p1: i64, p2: i64, p3: i64, p4: i64) -> bool {
+    let aid = match agent_for_pane(child_id) {
+        Some(a) => a as usize,
+        None => return false,
+    };
+    AGENTS.with(|a| {
+        if let Some(s) = a.borrow_mut().get_mut(aid) {
+            s.events.push_back([kind, p1, p2, p3, p4]);
+        }
+    });
+    rt_sched_ready_push(aid as u64);
+    true
+}
+
+/// Pop the running agent's next routed GUI event (for `pane-event` /
+/// rt_gpane_next_event_for's agent path). None if its queue is empty.
+pub fn pop_pane_event() -> Option<[i64; 5]> {
+    let cur = CURRENT.with(|c| c.get());
+    if cur == 0 {
+        return None; // the operator has no pane event queue
+    }
+    AGENTS.with(|a| a.borrow_mut().get_mut(cur).and_then(|s| s.events.pop_front()))
 }
 
 /// Route a message to the agent bound to pane `child_id` (mailbox post + wake).

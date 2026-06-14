@@ -7733,3 +7733,46 @@ fn agents_pane_close_wait() {
     assert_eq!(String::from_utf8_lossy(&c2), "closed", "ctl woke on close and exited");
     assert_eq!(wf64::agents::ready_count(), 0, "all agents idle/done");
 }
+
+#[test]
+fn agents_pane_event_multiplexing() {
+    // The general pane-input path: a pane controller drains its routed GUI events
+    // via `pane-event` (cooperative — yields when none waits), so a second agent
+    // keeps running the whole time. The host pump feeds events via route_pane_event.
+    let mut s = sess();
+    s.eval("\
+(agent-init) drop\n\
+: ev-agent\n\
+    7 (set-pane)\n\
+    begin\n\
+        pane-event\n\
+        dup ev-close = if  2drop 2drop drop  .\" C\"  exit  then\n\
+        dup ev-mouse = if  .\" M\"  then\n\
+        dup ev-key   = if  .\" K\"  then\n\
+        drop 2drop 2drop\n\
+    again ;\n\
+: ticker  3 (set-pane)  8 0 do  .\" .\"  pause  loop ;\n\
+' ev-agent agent drop\n\
+' ticker agent drop\n").unwrap();
+
+    // ev-agent parks on pane-event; ticker keeps running meanwhile.
+    for _ in 0..3 { wf64::agents::run_slice(); }
+    assert!(wf64::agents::take_pane_output(7).unwrap().is_empty(), "no input yet");
+    assert!(!wf64::agents::take_pane_output(3).unwrap().is_empty(), "ticker runs while pane waits");
+
+    // Route input to pane 7 (EV_MOUSE=3, EV_KEY=1, EV_CLOSE=6). Unknown pane is a no-op.
+    assert!(!wf64::agents::route_pane_event(99, 3, 0, 0, 0, 0), "no agent on pane 99");
+    assert!(wf64::agents::route_pane_event(7, 3, 10, 20, 1, 0), "mouse → pane 7");
+    for _ in 0..2 { wf64::agents::run_slice(); }
+    assert!(wf64::agents::route_pane_event(7, 1, 65, 0, 0, 0), "key → pane 7");
+    for _ in 0..2 { wf64::agents::run_slice(); }
+    assert!(wf64::agents::route_pane_event(7, 6, 0, 0, 0, 0), "close → pane 7");
+    for _ in 0..6 { wf64::agents::run_slice(); }
+
+    assert_eq!(
+        String::from_utf8_lossy(&wf64::agents::take_pane_output(7).unwrap()),
+        "MKC",
+        "pane-agent drained mouse, key, then close — in order",
+    );
+    assert_eq!(wf64::agents::ready_count(), 0, "all agents idle/done");
+}

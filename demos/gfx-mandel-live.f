@@ -55,7 +55,7 @@ variable lm-rgb
         pause                       \ <- yield each row so the console stays live
     loop
     lm-id @ gpane-present           \ submit the complete image once
-    begin  receive  ev-close =  until   \ wait (cooperatively) until the pane closes
+    wait-close                      \ cooperatively wait until the pane closes
 ;
 
 \ Open the pane and spawn the drawing agent; returns immediately so the console

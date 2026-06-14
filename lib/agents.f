@@ -48,3 +48,23 @@ forth-wordlist set-current
 \ self, then `receive` (a cooperative yield) until the host pump posts the reply
 \ back. Other agents keep running while we wait. ( request_id -- reply )
 : await-reply  ( request_id -- reply )  (req-bind)  receive ;
+
+\ ── Pane input for pane-agents (cooperative; the agent replacement for the
+\ ── blocking gpane-next-event). The host pump routes this pane's decoded events
+\ ── into the running agent's queue; here we drain one, yielding when none waits —
+\ ── so a pane WAITS for its input without BLOCKING the console or other panes.
+
+\ Get this pane-agent's next input event, yielding to the operator until one
+\ arrives. Same 5-value shape as gpane-next-event. ( -- p4 p3 p2 p1 kind )
+: pane-event  ( -- p4 p3 p2 p1 kind )
+    begin
+        0 0 gpane-next-event        \ agent path: poll own queue (args ignored)
+        dup 0= while                \ EV_NONE = empty?
+        drop 2drop 2drop            \ discard the 5 zero cells
+        0 (switch-to)               \ yield — the console + other panes run
+    repeat ;
+
+\ Block (cooperatively) until this pane is asked to close. Render-only panes use
+\ this after drawing; the console stays fully live while we wait. ( -- )
+: wait-close  ( -- )
+    begin  pane-event  nip nip nip nip  ev-close =  until ;
