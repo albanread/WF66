@@ -206,6 +206,25 @@ fn run_drain_loop(mut session: wf64::Wf64Session) {
         let _ = session.eval("(agent-init) drop\n");
     }
 
+    // Convenience for trying a pane-agent demo without a menu click: with
+    // WF66_DEMO=<file stem> (and WF66_AGENTS=1), auto-load demos/<stem>.f and run
+    // it at boot. Off by default. e.g. WF66_DEMO=gfx-mandel-live.
+    if agents_on {
+        if let Some(demo) = std::env::var_os("WF66_DEMO") {
+            let stem = demo.to_string_lossy().into_owned();
+            let path = format!("demos/{stem}.f");
+            match std::fs::read_to_string(&path) {
+                Ok(src) => match session.eval(&format!("{src}\n{stem}\n")) {
+                    Ok(_) => eprintln!(
+                        "[wf66-demo] loaded {path} (agents ready: {})",
+                        wf64::agents::ready_count()),
+                    Err(e) => eprintln!("[wf66-demo] {path}: eval error: {e}"),
+                },
+                Err(e) => eprintln!("[wf66-demo] cannot read {path}: {e}"),
+            }
+        }
+    }
+
     loop {
         let runnable = agents_on && wf64::agents::ready_count() > 0;
         // Block (200ms) when idle; poll (0ms) when agents have work to do.
@@ -314,6 +333,13 @@ fn handle_worker_event(session: &mut wf64::Wf64Session, ev: wf64::igui::channels
                 // The cross-thread half was the GUI thread's channels::push; this
                 // (post) half runs here on the worker, where the agent table lives.
                 wf64::agents::deliver_reply(request_id as u32, payload as u64);
+            }
+            IGuiEvent::Close { child_id } => {
+                // Route the pane's close to its controlling agent (if one is bound)
+                // so a pane-agent can `receive` it and exit cooperatively while the
+                // console stays live. No-op if no agent owns the pane (the classic
+                // gpane-next-event demos read Close directly while blocking instead).
+                wf64::agents::post_to_pane(child_id, wf64::runtime::EV_CLOSE as u64);
             }
             IGuiEvent::FrameClose => {
                 fconsole::append("∴ frame closing");

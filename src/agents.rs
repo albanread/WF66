@@ -450,6 +450,26 @@ pub fn agent_pane(aid: u64) -> i64 {
     AGENTS.with(|a| a.borrow().get(aid as usize).map_or(-1, |s| s.child_id))
 }
 
+/// Route a message to the agent bound to pane `child_id` (mailbox post + wake).
+/// Returns false if no live agent is bound to that pane. The host pump uses this
+/// to deliver per-pane GUI events (e.g. a pane Close) to the controlling agent so
+/// it can `receive` and act on them cooperatively — without the worker blocking.
+pub fn post_to_pane(child_id: i64, msg: u64) -> bool {
+    if child_id < 0 {
+        return false;
+    }
+    let aid = AGENTS.with(|a| {
+        a.borrow().iter().position(|s| s.child_id == child_id && !s.done)
+    });
+    match aid {
+        Some(a) => {
+            rt_mailbox_send(msg, a as u64);
+            true
+        }
+        None => false,
+    }
+}
+
 // ── Async GUI replies (pane-agent GUI, stage 3) ─────────────────────────────
 // An agent that needs a GUI round-trip (e.g. DirectWrite text measurement) binds
 // its request_id to itself and then `receive`s — a cooperative WAIT, not a thread

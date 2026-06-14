@@ -32,12 +32,17 @@ variable lm-rgb
         14 of 0x280000 endof   15 of 0x080010 endof
     endcase ;
 
-\ Draw one row (its own batch), then YIELD so the console gets a turn.
-\ Runs as an agent: takes no arguments, reads lm-id.
+\ The pane controller agent: bind to the pane, draw the whole set into ONE batch
+\ (so rows accumulate — `gpane-present`/submit REPLACES the pane's batch, it does
+\ not stack), `pause`ing each row so the console keeps its turn, present once, then
+\ WAIT for the pane's close event cooperatively. Runs as an agent (no args; reads
+\ lm-id). While it waits the worker keeps serving the console — wait, never block.
 : lm-agent  ( -- )
+    lm-id @ (set-pane)              \ bind this agent to its pane (event routing)
+    lm-id @ gpane-begin             \ one batch for the whole image
+    0x000000 gpane-clear
     180 0 do
         i lm-row !
-        lm-id @ gpane-begin
         240 0 do
             0e  0e
             i        s>d d>f  lm-dx f*  -2.5e  f+
@@ -47,9 +52,11 @@ variable lm-rgb
             i lm-blk *   lm-row @ lm-blk *   lm-blk lm-blk   lm-rgb @
             gpane-fill-rect
         loop
-        lm-id @ gpane-present
-        pause                       \ <- hand the worker back to the console
-    loop ;
+        pause                       \ <- yield each row so the console stays live
+    loop
+    lm-id @ gpane-present           \ submit the complete image once
+    begin  receive  ev-close =  until   \ wait (cooperatively) until the pane closes
+;
 
 \ Open the pane and spawn the drawing agent; returns immediately so the console
 \ stays interactive while the agent renders under the cooperative pump.

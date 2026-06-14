@@ -7702,3 +7702,34 @@ fn agents_surface_reply_end_to_end() {
     );
     assert_eq!(wf64::agents::ready_count(), 0, "all agents done");
 }
+
+#[test]
+fn agents_pane_close_wait() {
+    // The pane-lifecycle invariant: a pane controller agent WAITS for its close
+    // event cooperatively (`receive`) while another agent keeps running, then wakes
+    // when the host pump routes the pane's Close to it (`post_to_pane`). This is the
+    // mandel-live shape — render, then wait-for-close while serving the console.
+    let mut s = sess();
+    s.eval("\
+(agent-init) drop\n\
+: pane-ctl  5 (set-pane)  begin receive ev-close = until  .\" closed\" ;\n\
+: ticker    2 (set-pane)  6 0 do  .\" .\"  pause  loop ;\n\
+' pane-ctl agent drop\n\
+' ticker agent drop\n").unwrap();
+
+    // pane-ctl binds + parks awaiting close; ticker keeps running meanwhile.
+    for _ in 0..3 { wf64::agents::run_slice(); }
+    let t = wf64::agents::take_pane_output(2).expect("ticker bound");
+    let c = wf64::agents::take_pane_output(5).expect("ctl bound");
+    assert!(!t.is_empty(), "ticker keeps running while ctl waits; got {t:?}");
+    assert!(c.is_empty(), "ctl makes NO progress while awaiting close; got {c:?}");
+
+    assert!(!wf64::agents::post_to_pane(99, 6), "no agent bound to pane 99");
+    // The pump routes the pane's Close (ev-close = 6) to its controller.
+    assert!(wf64::agents::post_to_pane(5, 6), "pane 5 has a controller");
+
+    for _ in 0..12 { wf64::agents::run_slice(); }
+    let c2 = wf64::agents::take_pane_output(5).expect("ctl bound");
+    assert_eq!(String::from_utf8_lossy(&c2), "closed", "ctl woke on close and exited");
+    assert_eq!(wf64::agents::ready_count(), 0, "all agents idle/done");
+}
