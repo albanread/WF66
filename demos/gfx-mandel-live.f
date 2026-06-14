@@ -59,6 +59,11 @@ variable lm-rgb
     ['] lm-agent agent drop
     ." Mandelbrot rendering in the background — keep using the console." cr ;
 
-\ NOTE: this demo needs the cooperative IDE pump (agent scheduling on the worker
-\ thread), which is currently disabled because it conflicts with the IDE's SEH
-\ crash handler. Until that's resolved it does NOT auto-run and won't render.
+\ NOTE: this demo needs the cooperative agent pump on the IDE worker thread, which
+\ is gated behind the WF66_AGENTS environment variable. Launch the IDE with
+\ WF66_AGENTS=1, then load this demo: lm-agent draws one row per scheduler slice and
+\ `pause`s, so the Forth console stays interactive while the set renders. The
+\ fiber/SEH boot blocker that previously disabled this is RESOLVED — the worker boots
+\ clean under the pump (the old "register kernel procs with SEH" report was the benign
+\ 0x406D1388 thread-naming exception, not a real fault). See
+\ docs/design/wf66_pane_agent_gui.md.
