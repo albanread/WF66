@@ -28,6 +28,7 @@ static USER_BASE: AtomicU64 = AtomicU64::new(0);
 // user area, so the switch swaps their VALUES (mirror kernel/macros.masm).
 const USER_HANDLER: u64 = 0x80; // catch/throw handler chain head
 const USER_FSP: u64 = 0x1218; // FP stack pointer
+const USER_SELF: u64 = 0x17F0; // OOP: current message receiver (0 = none)
 
 #[inline]
 unsafe fn rd_cell(off: u64) -> u64 {
@@ -57,6 +58,12 @@ struct Slot {
     /// Saved catch/throw handler chain head (`user_HANDLER`) — per-agent so an
     /// agent's `catch` is isolated. Init 0 (no handler).
     handler: u64,
+    /// Saved OOP receiver (`user_SELF`) — per-agent, swapped at each switch. An
+    /// agent that yields mid-method (e.g. `pane-event` inside a `View` method)
+    /// keeps its own `self` even while another agent runs its own sends; the
+    /// send save/restore lives on each fiber's return stack, so the shared cell
+    /// must be swapped too. Init 0 (not inside a method).
+    self_obj: u64,
     /// This agent's incoming message queue (the mailbox).
     mailbox: VecDeque<u64>,
     /// True while the agent is in the ready queue (dedup guard).
@@ -74,6 +81,11 @@ struct Slot {
     /// cooperatively via `pane-event` (rt_gpane_next_event_for's agent path). One
     /// pane's events never block another pane.
     events: VecDeque<[i64; 5]>,
+    /// Optional receiver object (an oop.f object pointer) this agent runs a method
+    /// on. Lets a method be the agent body: `(spawn-recv)` stores it, the generic
+    /// entry word reads it via `(recv)` and sends `run` to it. 0 = none. This is
+    /// what the `View` base class spawns its controller agent with.
+    recv: u64,
     /// Backing storage for the agent's Forth stacks (kept alive; grows downward
     /// from the *_top addresses baked into `_ctx`). Empty for the operator.
     _ds: Vec<u64>,
@@ -158,11 +170,13 @@ pub extern "C" fn rt_agent_init() -> u64 {
             done: false,
             fsp: 0, // operator's live FSP/HANDLER are saved on the first switch-away
             handler: 0,
+            self_obj: 0, // operator's live SELF is saved on the first switch-away
             mailbox: VecDeque::new(),
             ready: false,
             child_id: -1, // operator is never a pane
             out: Vec::new(),
             events: VecDeque::new(),
+            recv: 0,
             _ds: Vec::new(),
             _ls: Vec::new(),
             _fp: Vec::new(),
@@ -177,6 +191,13 @@ pub extern "C" fn rt_agent_init() -> u64 {
 /// `(spawn) ( entry-xt -- aid )` — create an agent fiber that runs `entry_xt`.
 #[no_mangle]
 pub extern "C" fn rt_agent_spawn(entry_xt: u64) -> u64 {
+    rt_agent_spawn_with_recv(entry_xt, 0)
+}
+
+/// `(spawn-recv) ( recv entry-xt -- aid )` — like `(spawn)` but the agent carries
+/// a receiver object `recv` (read back via `(recv)`), so a method can be its body.
+#[no_mangle]
+pub extern "C" fn rt_agent_spawn_with_recv(entry_xt: u64, recv: u64) -> u64 {
     let up = USER_BASE.load(Ordering::SeqCst);
     let tramp = TRAMPOLINE.load(Ordering::SeqCst);
     let mut ds = vec![0u64; DS_CELLS];
@@ -197,11 +218,13 @@ pub extern "C" fn rt_agent_spawn(entry_xt: u64) -> u64 {
             done: false,
             fsp: fp_top, // own FP stack (top; grows down)
             handler: 0,  // no catch handler installed yet
+            self_obj: 0, // not inside a method yet (the entry send sets self)
             mailbox: VecDeque::new(),
             ready: false,
             child_id: -1, // unbound until (set-pane); output uses the shared buffer
             out: Vec::new(),
             events: VecDeque::new(),
+            recv,
             _ds: ds,
             _ls: ls,
             _fp: fp,
@@ -227,23 +250,26 @@ pub extern "C" fn rt_agent_switch(target: u64) -> u64 {
     if fiber.is_null() {
         return 0; // unknown or finished agent: stay put
     }
-    // Swap the per-agent user-area cells (FSP, HANDLER): save the outgoing agent's
-    // live values, install the target's. RBP/R15/XMM15/RBX are non-volatile, so
-    // the fiber switch preserves them; only these memory cells are shared.
+    // Swap the per-agent user-area cells (FSP, HANDLER, SELF): save the outgoing
+    // agent's live values, install the target's. RBP/R15/XMM15/RBX are non-volatile,
+    // so the fiber switch preserves them; only these memory cells are shared.
     let cur = CURRENT.with(|c| c.get());
-    let (fsp, handler) = unsafe { (rd_cell(USER_FSP), rd_cell(USER_HANDLER)) };
-    let (tfsp, thandler) = AGENTS.with(|a| {
+    let (fsp, handler, self_obj) =
+        unsafe { (rd_cell(USER_FSP), rd_cell(USER_HANDLER), rd_cell(USER_SELF)) };
+    let (tfsp, thandler, tself) = AGENTS.with(|a| {
         let mut a = a.borrow_mut();
         if let Some(s) = a.get_mut(cur) {
             s.fsp = fsp;
             s.handler = handler;
+            s.self_obj = self_obj;
         }
         let s = &a[t];
-        (s.fsp, s.handler)
+        (s.fsp, s.handler, s.self_obj)
     });
     unsafe {
         wr_cell(USER_FSP, tfsp);
         wr_cell(USER_HANDLER, thandler);
+        wr_cell(USER_SELF, tself);
     }
     CURRENT.with(|c| c.set(t));
     sys::switch_to(fiber);
@@ -358,20 +384,21 @@ pub extern "C" fn rt_mailbox_pop() -> u64 {
 #[no_mangle]
 pub extern "C" fn rt_agent_done() -> u64 {
     let cur = CURRENT.with(|c| c.get());
-    // Mark done and restore the OPERATOR's per-agent cells (FSP/HANDLER) before
-    // switching to it — unlike rt_agent_switch, this path doesn't go through the
-    // swap, so without this the operator would inherit the dead agent's FP stack.
-    let (ofsp, ohandler) = AGENTS.with(|a| {
+    // Mark done and restore the OPERATOR's per-agent cells (FSP/HANDLER/SELF)
+    // before switching to it — unlike rt_agent_switch, this path doesn't go through
+    // the swap, so without this the operator would inherit the dead agent's state.
+    let (ofsp, ohandler, oself) = AGENTS.with(|a| {
         let mut a = a.borrow_mut();
         if let Some(s) = a.get_mut(cur) {
             s.done = true;
         }
         let op = &a[0];
-        (op.fsp, op.handler)
+        (op.fsp, op.handler, op.self_obj)
     });
     unsafe {
         wr_cell(USER_FSP, ofsp);
         wr_cell(USER_HANDLER, ohandler);
+        wr_cell(USER_SELF, oself);
     }
     let op = OPERATOR.with(|c| c.get());
     CURRENT.with(|c| c.set(0));
@@ -395,6 +422,15 @@ pub extern "C" fn rt_agent_is_done(aid: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn rt_agent_self() -> u64 {
     CURRENT.with(|c| c.get()) as u64
+}
+
+/// `(recv) ( -- obj )` — the running agent's receiver object (set by
+/// `(spawn-recv)`), or 0 if none. The `View` controller entry word sends `run`
+/// to it. See lib/view.f.
+#[no_mangle]
+pub extern "C" fn rt_agent_recv() -> u64 {
+    let cur = CURRENT.with(|c| c.get());
+    AGENTS.with(|a| a.borrow().get(cur).map_or(0, |s| s.recv))
 }
 
 // ── Per-agent pane binding + output routing (pane-agent GUI, stage 1) ────────

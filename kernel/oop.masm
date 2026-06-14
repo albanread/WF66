@@ -136,10 +136,16 @@ endp()
 ; (no selector is pushed on the data stack — it lives in the record).
 ; ─────────────────────────────────────────────────────────────────────
 
-; send_pic_miss  ( internal )   rax = receiver, r11 = &record.
-;     Resolve the method the normal way, fill the cache (unless megamorphic),
-;     then tail into the method via send_enter.
-proc(send_pic_miss)
+; send_pic_resolve  ( internal )   rax = receiver, r11 = &record -> r8 = xt.
+;     Cold/changed-site path: resolve the selector through the receiver's
+;     vtable, fill the cache (unless the site is megamorphic), and RETURN with
+;     r8 = method xt.  The stub CALLs this on a miss, so both the warm path
+;     (cached_xt) and this path converge on the stub's shared `.dispatch` +
+;     `call send_enter` -- that single CALL pushes the send's continuation on
+;     EVERY path (hit and miss), which is what a non-tail send needs.  (The old
+;     miss handler tail-jumped straight into send_enter, so on a cold site no
+;     continuation was pushed and `self -> sel  more...` dropped `more`.)
+proc(send_pic_resolve)
     mov     rdx, [rax]                  ; class = [receiver]
     mov     r9,  [r11 + 16]             ; sel
     shl     r9, 3
@@ -148,20 +154,30 @@ proc(send_pic_miss)
     cmp     qword ptr [r11], -1         ; megamorphic sentinel? don't cache
     je      .skipfill
     mov     [r11 + 0], rdx              ; cached_class := class
-    mov     [r11 + 8], r8              ; cached_xt    := xt
+    mov     [r11 + 8], r8               ; cached_xt    := xt
     mov     r10, [UP + user_OOP_EPOCH]
     mov     [r11 + 24], r10             ; site_epoch   := current epoch
 .skipfill:
-    mov     rcx, rax                    ; rcx = receiver
-    mov     rax, [rbp]                  ; new TOS = first real arg
-    add     rbp, 8                      ; drop receiver
-    jmp     send_enter                  ; r8 = xt, rcx = receiver
+    ret                                 ; r8 = xt
 endp()
 
 ; (send-pic,)  ( sel -- )   compile a monomorphic-inline-cache send site.
 ;     Allocate + zero a 32-byte cache record in the VAR region (selector baked
-;     in), then emit the 59-byte fast-path stub at HERE.  Receiver in TOS(rax)
-;     at run time; misses tail to send_pic_miss (r11 = &record).
+;     in), then emit the 58-byte fast-path stub at HERE.  Receiver in TOS(rax)
+;     at run time.  Layout:
+;         mov r11, &record
+;         mov rdx,[rax] / cmp rdx,[r11]      ; class == cached_class?
+;         jne .miss
+;         mov r9,[epoch] / cmp r9,[r11+24]   ; epoch == site_epoch?
+;         jne .miss
+;         mov r8,[r11+8]                     ; r8 = cached_xt (HIT)
+;         jmp .dispatch
+;     .miss:  call send_pic_resolve          ; r8 = xt (resolve + fill), returns
+;     .dispatch:
+;         mov rcx,rax / mov rax,[rbp] / add rbp,8   ; receiver, first arg
+;         call send_enter                    ; <- pushes the continuation
+;   Hit and miss both reach the one `call send_enter`, so the continuation is
+;   always pushed; ; / EXIT may still TCO a *trailing* send (E8 -> E9).
 proc(send_pic_comp)
     ; ── allocate + init the cache record in VAR space ──
     mov     r10, [UP + user_VAR_HERE]
@@ -174,7 +190,7 @@ proc(send_pic_comp)
 
     ; ── emit the fast-path stub at HERE ──
     mov     r8, [UP + user_HERE]
-    lea     rcx, [rip + send_pic_miss]      ; rcx = miss handler (constant)
+    lea     rcx, [rip + send_pic_resolve]   ; rcx = resolver (constant)
     lea     r9,  [rip + send_enter]         ; r9  = method-enter (constant)
 
     mov     byte ptr [r8 + 0], 0x49         ; mov r11, rec   (49 BB imm64)
@@ -186,48 +202,51 @@ proc(send_pic_comp)
     mov     byte ptr [r8 + 13], 0x49        ; cmp rdx, [r11]   (== cached_class?)
     mov     byte ptr [r8 + 14], 0x3B
     mov     byte ptr [r8 + 15], 0x13
-    mov     byte ptr [r8 + 16], 0x0F        ; jne send_pic_miss  (0F 85 rel32)
-    mov     byte ptr [r8 + 17], 0x85
-    lea     rdx, [r8 + 22]                  ; next IP after this jne
-    mov     r11, rcx
+    mov     byte ptr [r8 + 16], 0x75        ; jne .miss  (short; +0x13 -> off 37)
+    mov     byte ptr [r8 + 17], 0x13
+    mov     byte ptr [r8 + 18], 0x4C        ; mov r9, [UP + user_OOP_EPOCH]  (4C 8B 8B disp32)
+    mov     byte ptr [r8 + 19], 0x8B
+    mov     byte ptr [r8 + 20], 0x8B
+    mov     dword ptr [r8 + 21], user_OOP_EPOCH
+    mov     byte ptr [r8 + 25], 0x4D        ; cmp r9, [r11+24]   (== site_epoch?)
+    mov     byte ptr [r8 + 26], 0x3B
+    mov     byte ptr [r8 + 27], 0x4B
+    mov     byte ptr [r8 + 28], 0x18
+    mov     byte ptr [r8 + 29], 0x75        ; jne .miss  (short; +0x06 -> off 37)
+    mov     byte ptr [r8 + 30], 0x06
+    mov     byte ptr [r8 + 31], 0x4D        ; mov r8, [r11+8]   (r8 = cached_xt, HIT)
+    mov     byte ptr [r8 + 32], 0x8B
+    mov     byte ptr [r8 + 33], 0x43
+    mov     byte ptr [r8 + 34], 0x08
+    mov     byte ptr [r8 + 35], 0xEB        ; jmp .dispatch  (short; +0x05 -> off 42)
+    mov     byte ptr [r8 + 36], 0x05
+    ; .miss (offset 37): resolve through the vtable, fill the cache, return r8=xt
+    mov     byte ptr [r8 + 37], 0xE8        ; call send_pic_resolve  (E8 rel32)
+    lea     rdx, [r8 + 42]                  ; next IP after this call
+    mov     r11, rcx                        ; rcx = resolver
     sub     r11, rdx
-    mov     dword ptr [r8 + 18], r11d
-    mov     byte ptr [r8 + 22], 0x4C        ; mov r9, [UP + user_OOP_EPOCH]  (4C 8B 8B disp32)
-    mov     byte ptr [r8 + 23], 0x8B
-    mov     byte ptr [r8 + 24], 0x8B
-    mov     dword ptr [r8 + 25], user_OOP_EPOCH
-    mov     byte ptr [r8 + 29], 0x4D        ; cmp r9, [r11+24]   (== site_epoch?)
-    mov     byte ptr [r8 + 30], 0x3B
-    mov     byte ptr [r8 + 31], 0x4B
-    mov     byte ptr [r8 + 32], 0x18
-    mov     byte ptr [r8 + 33], 0x0F        ; jne send_pic_miss  (0F 85 rel32)
-    mov     byte ptr [r8 + 34], 0x85
-    lea     rdx, [r8 + 39]
-    mov     r11, rcx
-    sub     r11, rdx
-    mov     dword ptr [r8 + 35], r11d
-    mov     byte ptr [r8 + 39], 0x4D        ; mov r8, [r11+8]   (r8 = cached_xt)
-    mov     byte ptr [r8 + 40], 0x8B
-    mov     byte ptr [r8 + 41], 0x43
-    mov     byte ptr [r8 + 42], 0x08
-    mov     byte ptr [r8 + 43], 0x48        ; mov rcx, rax      (rcx = receiver)
-    mov     byte ptr [r8 + 44], 0x89
-    mov     byte ptr [r8 + 45], 0xC1
-    mov     byte ptr [r8 + 46], 0x48        ; mov rax, [rbp]    (TOS = first arg)
-    mov     byte ptr [r8 + 47], 0x8B
-    mov     byte ptr [r8 + 48], 0x45
-    mov     byte ptr [r8 + 49], 0x00
-    mov     byte ptr [r8 + 50], 0x48        ; add rbp, 8        (drop receiver)
-    mov     byte ptr [r8 + 51], 0x83
-    mov     byte ptr [r8 + 52], 0xC5
-    mov     byte ptr [r8 + 53], 0x08
-    mov     byte ptr [r8 + 54], 0xE9        ; jmp send_enter    (E9 rel32)
-    lea     rdx, [r8 + 59]
-    sub     r9, rdx
-    mov     dword ptr [r8 + 55], r9d
-    add     r8, 59
+    mov     dword ptr [r8 + 38], r11d
+    ; .dispatch (offset 42): set up (receiver, first arg) and enter the method
+    mov     byte ptr [r8 + 42], 0x48        ; mov rcx, rax      (rcx = receiver)
+    mov     byte ptr [r8 + 43], 0x89
+    mov     byte ptr [r8 + 44], 0xC1
+    mov     byte ptr [r8 + 45], 0x48        ; mov rax, [rbp]    (TOS = first arg)
+    mov     byte ptr [r8 + 46], 0x8B
+    mov     byte ptr [r8 + 47], 0x45
+    mov     byte ptr [r8 + 48], 0x00
+    mov     byte ptr [r8 + 49], 0x48        ; add rbp, 8        (drop receiver)
+    mov     byte ptr [r8 + 50], 0x83
+    mov     byte ptr [r8 + 51], 0xC5
+    mov     byte ptr [r8 + 52], 0x08
+    mov     byte ptr [r8 + 53], 0xE8        ; call send_enter   (E8 rel32) -- pushes continuation
+    lea     rdx, [r8 + 58]                  ; rdx = stub_end (the call's return IP = continuation)
+    sub     r9, rdx                         ; r9 = send_enter - stub_end
+    mov     dword ptr [r8 + 54], r9d
+    add     r8, 58
     mov     [UP + user_HERE], r8
-    mov     qword ptr [UP + user_TAIL_CALL], 0
+    ; A *trailing* send is still tail-call-optimisable: ; / EXIT see the CALL at
+    ; [HERE-5] and patch its E8 -> E9 (jmp send_enter), so tail sends stay flat.
+    mov     [UP + user_TAIL_CALL], r8
     mov     TOS, [DSP]
     stk(1, 0)
     next()

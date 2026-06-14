@@ -148,3 +148,21 @@ proc(agent_req_bind_word)
     add     rbp, cell
     next()
 endp()
+
+; (spawn-recv)  ( recv entry-xt -- aid )   like (spawn) but the agent carries a
+;     receiver object, so a method can be its body (see lib/view.f / View class).
+proc(agent_spawn_recv_word)
+    mov     rcx, rax                        ; arg1 = entry-xt (TOS)
+    mov     rdx, [rbp]                      ; arg2 = recv (NOS)
+    win64_call(rt_agent_spawn_with_recv)    ; rax = aid
+    add     rbp, cell                       ; drop recv (NOS); TOS becomes aid
+    next()
+endp()
+
+; (recv)  ( -- obj )   the running agent's receiver object (0 if none)
+proc(agent_recv_word)
+    mov     [rbp - cell], rax
+    win64_call(rt_agent_recv)
+    sub     rbp, cell
+    next()
+endp()

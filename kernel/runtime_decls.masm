@@ -56,6 +56,8 @@
 @extern rt_mailbox_pop(0)       ; ( -- msg ) dequeue running agent's message (-1)
 @extern rt_agent_set_pane(1)    ; (child_id -- ) bind running agent to a pane
 @extern rt_agent_req_bind(1)    ; (request_id -- ) running agent awaits this reply
+@extern rt_agent_spawn_with_recv(2) ; (xt, recv) -> aid: spawn an agent with a receiver obj
+@extern rt_agent_recv(0)        ; ( -- obj ) running agent's receiver object
 @extern rt_ir_open_locals(3)    ; (UP, n_total, n_init) WF66: record the `{:` prologue
 @extern rt_slurp_file(2)        ; read file at (addr,len) into Rust Vec, return content ptr or 0
 @extern rt_slurp_len(0)         ; return byte length of top slurped file

@@ -547,6 +547,8 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("(mailbox-pop)",  "mailbox_pop_word",        0),
     ("(set-pane)",     "agent_set_pane_word",     0),
     ("(req-bind)",     "agent_req_bind_word",     0),
+    ("(spawn-recv)",   "agent_spawn_recv_word",   0),
+    ("(recv)",         "agent_recv_word",         0),
     ("(inline,)",      "inline_comma_word",       0),
     ("(inline-var,)",  "inline_var_comp",         0),
     // Parse & dict
@@ -1495,6 +1497,8 @@ impl Wf64Session {
                 "rt_mailbox_pop"    => Some(crate::agents::rt_mailbox_pop    as *mut c_void),
                 "rt_agent_set_pane" => Some(crate::agents::rt_agent_set_pane as *mut c_void),
                 "rt_agent_req_bind" => Some(crate::agents::rt_agent_req_bind as *mut c_void),
+                "rt_agent_spawn_with_recv" => Some(crate::agents::rt_agent_spawn_with_recv as *mut c_void),
+                "rt_agent_recv"     => Some(crate::agents::rt_agent_recv     as *mut c_void),
                 "rt_ir_open_locals" => Some(runtime::rt_ir_open_locals as *mut c_void),
                 "rt_pin_analyze" => Some(runtime::rt_pin_analyze  as *mut c_void),
                 "rt_pin_rewrite" => Some(runtime::rt_pin_rewrite  as *mut c_void),
@@ -1776,6 +1780,13 @@ impl Wf64Session {
         if agents_path.exists() {
             session.load_source_file(&agents_path)
                 .with_context(|| format!("boot: load {}", agents_path.display()))?;
+        }
+        // View base class (lib/view.f) — OO pane-agent app framework on top of
+        // oop.f + agents.f: subclass View, override draw / on-* hooks.
+        let view_path = core_path.with_file_name("view.f");
+        if view_path.exists() {
+            session.load_source_file(&view_path)
+                .with_context(|| format!("boot: load {}", view_path.display()))?;
         }
         if boot_timing {
             let t_oop = std::time::Instant::now();

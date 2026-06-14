@@ -7776,3 +7776,129 @@ fn agents_pane_event_multiplexing() {
     );
     assert_eq!(wf64::agents::ready_count(), 0, "all agents idle/done");
 }
+
+#[test]
+fn oo_nontail_self_send_keeps_continuation() {
+    // Regression: a NON-tail `self -> sel` must return to its continuation.
+    // The late PIC stub used to fall through into send_enter (a tail-jump),
+    // dropping everything after the send on both the cold-miss and warm-hit
+    // paths. Now the stub CALLs send_enter, so the continuation is preserved.
+    let mut s = sess();
+    // Single (cold) call: "1A2", not "1A".
+    let out = s.eval("\
+object subclass tp\n\
+  :m aa ( -- ) .\" A\" ;m\n\
+  :m bb ( -- ) .\" 1\" self -> aa .\" 2\" ;m\n\
+end-class\n\
+tp new op\n\
+op -> bb\n").unwrap();
+    assert!(out.contains("1A2"), "cold non-tail self-send kept its continuation: {out:?}");
+    // Repeat (warm cache) and a nested send (go -> redraw -> draw) — both stay intact.
+    let out2 = s.eval("\
+object subclass tq\n\
+  :m draw   ( -- ) .\" D\" ;m\n\
+  :m redraw ( -- ) self -> draw ;m\n\
+  :m go     ( -- ) .\" (\" self -> redraw .\" )\" ;m\n\
+end-class\n\
+tq new oq\n\
+oq -> go  oq -> go\n").unwrap();
+    assert!(out2.matches("(D)").count() == 2, "warm + nested non-tail self-sends intact: {out2:?}");
+}
+
+#[test]
+fn agents_view_dispatch() {
+    // The `View` base class: a subclass's draw + on-* hooks are driven from the
+    // cooperative agent loop as the pump routes events to the pane. Verifies the
+    // receiver glue ((spawn-recv)/(recv)), View.run, and View.dispatch decoding —
+    // headlessly (gpane ops are no-ops without a window; the hooks emit markers).
+    let mut s = sess();
+    s.eval("\
+(agent-init) drop\n\
+View subclass tv\n\
+  :m draw ( -- ) ;m\n\
+  :m redraw ( -- )  self -> draw ;m\n\
+  :m on-mouse ( x y op bm -- )  2drop 2drop  .\" M\" ;m\n\
+  :m on-key   ( v m d r -- )  2drop 2drop  .\" K\" ;m\n\
+  :m on-close ( -- )  .\" C\" ;m\n\
+end-class\n\
+tv new the-view\n\
+8 the-view -> set-pane-id\n\
+the-view ' view-run (spawn-recv) dup (ready-push) drop\n").unwrap();
+
+    for _ in 0..3 { wf64::agents::run_slice(); }
+
+    // Route input; the View routes each to the matching hook.
+    wf64::agents::route_pane_event(8, 3, 10, 20, 1, 0); // ev-mouse (x=10 y=20 op=1)
+    for _ in 0..2 { wf64::agents::run_slice(); }
+    wf64::agents::route_pane_event(8, 1, 65, 0, 1, 0);  // ev-key
+    for _ in 0..2 { wf64::agents::run_slice(); }
+    wf64::agents::route_pane_event(8, 6, 0, 0, 0, 0);   // ev-close
+    for _ in 0..4 { wf64::agents::run_slice(); }
+
+    assert_eq!(
+        String::from_utf8_lossy(&wf64::agents::take_pane_output(8).unwrap()),
+        "MKC",
+        "View dispatched mouse → on-mouse, key → on-key, close → on-close",
+    );
+    assert_eq!(wf64::agents::ready_count(), 0, "view agent finished on close");
+}
+
+#[test]
+fn demo_view_apps_compile() {
+    // The View example apps must load against the booted lib/view.f and leave
+    // their entry words defined — a smoke test that the public View API the demos
+    // lean on (subclass/ivar/:m/->/show-view) stays intact.
+    let mut s = sess();
+    for (f, word) in [
+        ("demos/view-counter.f", "view-counter"),
+        ("demos/view-shapes.f", "view-shapes"),
+    ] {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f),
+        ).unwrap();
+        let out = s.eval(&format!("{src}\n")).unwrap();
+        assert!(!out.contains('?'), "{f} reported an error: {out:?}");
+        // Ticking the entry word throws if it never defined.
+        let probe = s.eval(&format!("' {word} drop .\" DEFINED\" cr\n")).unwrap();
+        assert!(probe.contains("DEFINED"), "{f} did not define `{word}`: {probe:?}");
+    }
+}
+
+#[test]
+fn agents_self_is_per_agent() {
+    // `self` (user_SELF) lives in one shared user-area cell, but each agent has
+    // its own return stack where sends save/restore self. An agent that yields
+    // mid-method (here `pause`) must keep ITS receiver across the switch — so the
+    // switch swaps user_SELF too. Two agents each spin their own object's tag
+    // through three emits with a yield between each; with proper isolation pane 5
+    // sees only 'A' and pane 6 only 'B'. Without the swap, a resumed agent reads
+    // the other agent's object and the tags cross over.
+    let mut s = sess();
+    s.eval("\
+(agent-init) drop\n\
+object subclass tagged\n\
+  cell ivar: tag\n\
+  :m set  ( c -- ) to tag ;m\n\
+  :m spin ( -- ) tag emit pause tag emit pause tag emit ;m\n\
+end-class\n\
+tagged new ta  65 ta -> set\n\
+tagged new tb  66 tb -> set\n\
+: spin-a  5 (set-pane)  (recv) -> spin ;\n\
+: spin-b  6 (set-pane)  (recv) -> spin ;\n\
+ta ' spin-a (spawn-recv) dup (ready-push) drop\n\
+tb ' spin-b (spawn-recv) dup (ready-push) drop\n").unwrap();
+
+    for _ in 0..6 { wf64::agents::run_slice(); }
+
+    assert_eq!(
+        String::from_utf8_lossy(&wf64::agents::take_pane_output(5).unwrap()),
+        "AAA",
+        "agent A kept its own self across every pause",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&wf64::agents::take_pane_output(6).unwrap()),
+        "BBB",
+        "agent B kept its own self across every pause",
+    );
+    assert_eq!(wf64::agents::ready_count(), 0, "both spin agents finished");
+}
