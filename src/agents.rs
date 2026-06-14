@@ -15,7 +15,7 @@
 //! frames, and FSP/HANDLER swapping are layered on after this is solid.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -82,6 +82,11 @@ thread_local! {
     static CURRENT: Cell<usize> = const { Cell::new(0) };
     /// Round-robin ready queue of runnable agent ids (the scheduler's run set).
     static READY: RefCell<VecDeque<usize>> = const { RefCell::new(VecDeque::new()) };
+    /// `request_id -> aid`: routes an async GUI reply (a SurfaceReply) back to the
+    /// agent awaiting it. Worker-thread-local like the agent table; the wake's
+    /// cross-thread half is `channels::push`, its `(post)` half runs here on the
+    /// worker. See docs/design/wf66_pane_agent_gui.md §5.
+    static REQ_AGENTS: RefCell<HashMap<u32, usize>> = RefCell::new(HashMap::new());
 }
 
 // Per-agent Forth stack sizes (u64 cells).
@@ -158,6 +163,7 @@ pub extern "C" fn rt_agent_init() -> u64 {
         });
     });
     READY.with(|r| r.borrow_mut().clear());
+    REQ_AGENTS.with(|m| m.borrow_mut().clear());
     CURRENT.with(|c| c.set(0));
     0
 }
@@ -442,4 +448,41 @@ pub fn take_pane_output(child_id: i64) -> Option<Vec<u8>> {
 /// The `child_id` agent `aid` is bound to, or -1 if unbound/unknown.
 pub fn agent_pane(aid: u64) -> i64 {
     AGENTS.with(|a| a.borrow().get(aid as usize).map_or(-1, |s| s.child_id))
+}
+
+// ── Async GUI replies (pane-agent GUI, stage 3) ─────────────────────────────
+// An agent that needs a GUI round-trip (e.g. DirectWrite text measurement) binds
+// its request_id to itself and then `receive`s — a cooperative WAIT, not a thread
+// block. When the GUI thread answers, the host pump calls `deliver_reply`, which
+// posts the answer to the agent's mailbox and re-readies it. See `await-reply`
+// (lib/agents.f) and docs/design/wf66_pane_agent_gui.md §5.
+
+/// `(req-bind) ( request_id -- )` — record that the RUNNING agent is awaiting the
+/// async reply for `request_id`. Pair with `receive` (see `await-reply`).
+#[no_mangle]
+pub extern "C" fn rt_agent_req_bind(request_id: u64) -> u64 {
+    let cur = CURRENT.with(|c| c.get());
+    REQ_AGENTS.with(|m| m.borrow_mut().insert(request_id as u32, cur));
+    0
+}
+
+/// Deliver an async GUI reply: route `payload` to whichever agent is awaiting
+/// `request_id`, waking it (mailbox post + ready-push). Returns false if no agent
+/// awaits that id (already woken / timed out / unknown). Called by the host pump
+/// when a `SurfaceReply` arrives — never from the GUI thread, because the agent
+/// table is thread-local (the whole reason the wake is split across threads).
+pub fn deliver_reply(request_id: u32, payload: u64) -> bool {
+    let aid = REQ_AGENTS.with(|m| m.borrow_mut().remove(&request_id));
+    match aid {
+        Some(a) => {
+            rt_mailbox_send(payload, a as u64);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Number of replies still outstanding (for the pump's deadline scan / tests).
+pub fn pending_replies() -> usize {
+    REQ_AGENTS.with(|m| m.borrow().len())
 }

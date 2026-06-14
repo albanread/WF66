@@ -7596,3 +7596,44 @@ run-until-idle\n";
     // An unbound / unknown pane has no agent bound.
     assert!(wf64::agents::take_pane_output(99).is_none(), "pane 99 is unbound");
 }
+
+#[test]
+fn agents_async_reply_wait_not_block() {
+    // Pane-agent GUI, stage 3 (the core invariant, worker-side, headless): an
+    // agent awaiting an async GUI reply WAITS cooperatively (parks on `receive`)
+    // — it does NOT block the OS thread. Another agent keeps running the whole
+    // time, and the waiter wakes only when the reply is delivered. This is the
+    // "a pane may wait, but must never block" guarantee, proven end to end on the
+    // worker side: arm agents, then drive `run_slice` from the host (Rust), play
+    // the GUI by calling `deliver_reply`, and observe per-pane progress.
+    let mut s = sess();
+    // agent A (pane 1) awaits the reply for request 42; agent B (pane 2) ticks 6
+    // times, pausing between. Spawn but do NOT run here (no run-slice in the eval).
+    s.eval("\
+(agent-init) drop\n\
+: agentA  1 (set-pane)  42 await-reply drop  .\" R\" ;\n\
+: agentB  2 (set-pane)  6 0 do  .\" .\"  pause  loop ;\n\
+' agentA agent drop\n\
+' agentB agent drop\n").unwrap();
+
+    // Drive a few host slices. A parks on `receive` immediately; B keeps ticking.
+    for _ in 0..3 { wf64::agents::run_slice(); }
+    let b_mid = wf64::agents::take_pane_output(2).expect("pane 2 bound");
+    let a_mid = wf64::agents::take_pane_output(1).expect("pane 1 bound");
+    assert!(!b_mid.is_empty(), "B must keep running while A waits; got {b_mid:?}");
+    assert!(a_mid.is_empty(), "A must make NO progress while awaiting its reply; got {a_mid:?}");
+    assert_eq!(wf64::agents::pending_replies(), 1, "A's request is outstanding");
+
+    // Delivering to an unknown request id is a harmless no-op.
+    assert!(!wf64::agents::deliver_reply(999, 0), "no agent awaits request 999");
+
+    // The host (playing the GUI thread's pump) delivers A's reply -> A is woken.
+    assert!(wf64::agents::deliver_reply(42, 0xBEEF), "agent A awaits request 42");
+    assert_eq!(wf64::agents::pending_replies(), 0, "no replies outstanding after delivery");
+
+    // Drive to completion; A wakes, receives, and emits its mark into pane 1.
+    for _ in 0..12 { wf64::agents::run_slice(); }
+    let a_fin = wf64::agents::take_pane_output(1).expect("pane 1 bound");
+    assert_eq!(String::from_utf8_lossy(&a_fin), "R", "A woke after its reply and finished");
+    assert_eq!(wf64::agents::ready_count(), 0, "all agents idle/done");
+}

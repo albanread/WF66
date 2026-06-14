@@ -43,3 +43,8 @@ forth-wordlist set-current
 \ Drive slices until no agent is runnable (useful headless / for batch work).
 : run-until-idle  ( -- )
     begin  (ready-count) 0>  while  run-slice  repeat ;
+
+\ Await an async GUI reply WITHOUT blocking the thread: bind this request id to
+\ self, then `receive` (a cooperative yield) until the host pump posts the reply
+\ back. Other agents keep running while we wait. ( request_id -- reply )
+: await-reply  ( request_id -- reply )  (req-bind)  receive ;

@@ -546,6 +546,7 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("(mailbox-len)",  "mailbox_len_word",        0),
     ("(mailbox-pop)",  "mailbox_pop_word",        0),
     ("(set-pane)",     "agent_set_pane_word",     0),
+    ("(req-bind)",     "agent_req_bind_word",     0),
     ("(inline,)",      "inline_comma_word",       0),
     ("(inline-var,)",  "inline_var_comp",         0),
     // Parse & dict
@@ -1493,6 +1494,7 @@ impl Wf64Session {
                 "rt_mailbox_len"    => Some(crate::agents::rt_mailbox_len    as *mut c_void),
                 "rt_mailbox_pop"    => Some(crate::agents::rt_mailbox_pop    as *mut c_void),
                 "rt_agent_set_pane" => Some(crate::agents::rt_agent_set_pane as *mut c_void),
+                "rt_agent_req_bind" => Some(crate::agents::rt_agent_req_bind as *mut c_void),
                 "rt_ir_open_locals" => Some(runtime::rt_ir_open_locals as *mut c_void),
                 "rt_pin_analyze" => Some(runtime::rt_pin_analyze  as *mut c_void),
                 "rt_pin_rewrite" => Some(runtime::rt_pin_rewrite  as *mut c_void),

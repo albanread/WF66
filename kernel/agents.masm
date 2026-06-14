@@ -138,3 +138,13 @@ proc(agent_set_pane_word)
     add     rbp, cell
     next()
 endp()
+
+; (req-bind)  ( request_id -- )   record that the running agent awaits the async
+;     GUI reply for request_id; pair with `receive` (see await-reply). Stage 3.
+proc(agent_req_bind_word)
+    mov     rcx, rax                        ; arg = request_id (TOS)
+    win64_call(rt_agent_req_bind)
+    mov     rax, [rbp]                      ; drop request_id: raise NOS
+    add     rbp, cell
+    next()
+endp()
