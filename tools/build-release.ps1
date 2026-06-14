@@ -111,7 +111,8 @@ $userDocFiles = @(
     'forth-tutorial.md',
     'forth-reference.md',
     'ide-guide.md',
-    'keyboard-shortcuts.md'
+    'keyboard-shortcuts.md',
+    'multitasking-in-forth.md'
 )
 $docDest = Join-Path $OutDir 'docs'
 New-Item -ItemType Directory -Force -Path $docDest | Out-Null

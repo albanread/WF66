@@ -55,6 +55,8 @@ flowchart LR
 - `LET` infix expression evaluator for compact floating-point work
 - `forget_last` to roll back the most recent definition during development
 - WF66 Optimizer toggle (Forth → WF66 Optimizer; on by default)
+- Cooperative multitasking — every graphical pane is an *agent* (green thread), so
+  the console stays live while windows render ([Multitasking in Forth](multitasking-in-forth.md))
 
 ## Pages
 
@@ -80,6 +82,7 @@ flowchart LR
 |---|---|
 | [Optimizer](optimizer.md) | Token-IR optimizer — pipeline, passes, benchmarks, scope |
 | [Object System](objects.md) | Classes, methods, instance variables, polymorphism, PIC dispatch |
+| [Multitasking in Forth](multitasking-in-forth.md) | Cooperative agents — green-thread pane-agents, `pause`/`receive`/`(post)`, building responsive windowed apps |
 | [LET Expressions](dsl_user_guide.md) | Infix math evaluator for compact FP work |
 | [Managed Strings](strings_design.md) | V2s managed strings — GC-backed, length-prefix |
 | [Vocabularies](vocabularies.md) | Wordlists, search order, `also`/`previous`, scoping |
