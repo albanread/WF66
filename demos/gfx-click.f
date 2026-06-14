@@ -1,15 +1,17 @@
-\ gfx-click.f — interactive click counter.
+\ gfx-click.f — interactive click counter (cooperative PANE-AGENT).
 \
-\ Opens a graphical pane and runs an event loop.  Left-click on
-\ the square cycles its colour through six hues and bumps a
-\ counter.  Close the pane (or the IDE frame) to exit.
+\ Opens a graphical pane and runs an event loop INSIDE a controller
+\ agent so the Forth console stays live.  Left-click on the square
+\ cycles its colour through six hues and bumps a counter.  Close the
+\ pane (or the IDE frame) to exit.
 \
-\ Demonstrates the full Forth gpane workflow:
+\ Demonstrates the full Forth gpane workflow under the agent pump:
 \   - gpane-open / -begin / draws / -present for painting
-\   - gpane-next-event for input
+\   - pane-event (cooperative replacement for gpane-next-event)
 \   - locals + IF dispatch over event kinds
 \
-\ See lib/core.f for the ev-* and mouse-* constants used below.
+\ See lib/core.f for the ev-* and mouse-* constants used below, and
+\ lib/agents.f for (set-pane) / agent / pane-event.
 \
 \ Why an IF chain instead of CASE: WF64's `endcase` emits a
 \ runtime DROP that fires in the no-match path (drops the test
@@ -21,6 +23,8 @@
 \ here and use plain IFs that never have a default-trap.
 
 0x10131A  constant CC-BG
+
+variable cc-id        \ the graphics pane id (so the no-arg agent can reach it)
 
 \ Six bright hues; (count mod 6) picks one.
 : cc-colour ( n -- rgb )
@@ -96,22 +100,37 @@
     cc-drop-event  0
 ;
 
-: gfx-click
-    cr ." opening click counter ..." cr
+\ The pane controller agent: bind to the pane, do the initial render,
+\ then run the event loop cooperatively.  It keeps its loop state
+\ ( id count ) on its own data stack across pane-event, exactly as the
+\ old blocking loop kept it across gpane-next-event.  Runs as an agent
+\ (no args; reads cc-id).  pane-event yields to the operator when no
+\ event waits, so the console stays live the whole time.
+: cc-click-agent  ( -- )
+    cc-id @ (set-pane)         \ bind this agent to its pane (event routing)
 
-    480 360  S" ∴ Click Counter"  gpane-open
-    dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
-
+    cc-id @                    \ id
     0                          \ initial count
     2dup cc-paint              \ initial render
 
-    \ Event loop — block indefinitely (-1) so we wake exactly on
-    \ events for our pane (plus globals like ev-frame-close).
+    \ Event loop — pane-event waits cooperatively for our pane's
+    \ events (close/resize/mouse), yielding the console its turn.
     begin
-        over -1 gpane-next-event   \ ( id count p4 p3 p2 p1 kind )
+        pane-event                 \ ( id count p4 p3 p2 p1 kind )
         cc-handle                  \ ( id count' done? )
     until
 
     2drop
-    ." done — click counter closed" cr
+;
+
+\ Open the pane and spawn the controller agent; returns immediately so
+\ the console stays interactive while the click counter runs.
+: gfx-click  ( -- )
+    cr ." opening click counter ..." cr
+
+    480 360  S" ∴ Click Counter"  gpane-open  cc-id !
+    cc-id @ 0= if  ." (no UI substrate — demo skipped)" cr  exit then
+
+    ['] cc-click-agent agent drop
+    ." click counter running — keep using the console." cr
 ;

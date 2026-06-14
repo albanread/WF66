@@ -7,8 +7,15 @@
 \
 \ The `0x` prefix forces hex parsing for the colour literals;
 \ decimal stays the default for the geometry math.
+\
+\ Driven by a COOPERATIVE PANE-AGENT: the entry word opens the pane and
+\ spawns sp-agent, then returns immediately so the Forth console stays
+\ live. The agent binds to its pane, draws the spiral once, presents it,
+\ then WAITS for the pane's close event cooperatively (never blocking).
 
 0x0A0F18  constant BG-DARK
+
+variable sp-id        \ the graphics pane id (so the no-arg agent can reach it)
 
 \ 16-step palette walking the hue ring.
 : hue ( i -- rgb )
@@ -69,15 +76,13 @@
     swap                \ ( cx cy )
 ;
 
-: gfx-spiral
-    cr ." opening graphical pane ..." cr
-
-    480 360  S" ∴ Spiral"  gpane-open
-    dup 0= if
-        drop ." (no UI substrate — demo skipped)" cr exit
-    then
-
-    dup gpane-begin
+\ The pane controller agent: bind to the pane, draw the spiral into ONE
+\ batch, present it once, then WAIT for the pane's close event
+\ cooperatively. Runs as an agent (no args; reads sp-id). While it waits
+\ the worker keeps serving the console — wait, never block.
+: sp-agent  ( -- )
+    sp-id @ (set-pane)              \ bind this agent to its pane (event routing)
+    sp-id @ gpane-begin             \ one batch for the whole image
     BG-DARK gpane-clear
 
     \ 48 small circles arranged in an outward spiral.
@@ -88,8 +93,19 @@
         gpane-fill-circle
     loop
 
-    gpane-present
-    drop
+    sp-id @ gpane-present           \ submit the complete image once
+    wait-close                      \ cooperatively wait until the pane closes
+;
 
-    ." done — see the Spiral window" cr
+\ Open the pane and spawn the drawing agent; returns immediately so the
+\ console stays interactive while the agent renders under the cooperative
+\ pump.
+: gfx-spiral  ( -- )
+    cr ." opening graphical pane ..." cr
+
+    480 360  S" ∴ Spiral"  gpane-open  sp-id !
+    sp-id @ 0= if  ." (no UI substrate — demo skipped)" cr  exit then
+
+    ['] sp-agent agent drop
+    ." Spiral rendering in the background — keep using the console." cr
 ;

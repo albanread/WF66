@@ -12,6 +12,10 @@
 \     push cx cy    (the pixel's complex coordinate)
 \     push maxiter  onto the DATA stack
 \
+\ Driven by a COOPERATIVE PANE-AGENT so the Forth console stays live: the
+\ controller agent binds the pane, draws the whole set into one batch
+\ (`pause`ing each row so the console keeps its turn), presents once, then
+\ WAITS for the pane's close event cooperatively. See lib/agents.f.
 \ See lib/core.f for gpane-* and ev-* definitions.
 
 64 constant mb-maxiter
@@ -21,6 +25,7 @@
 3.5e  240e f/  fconstant mb-dx
 2.5e  180e f/  fconstant mb-dy
 
+variable mb-id        \ the graphics pane id (so the no-arg agent can reach it)
 variable mb-row
 variable mb-rgb
 
@@ -47,9 +52,13 @@ variable mb-rgb
     endcase
 ;
 
-\ Render the complete set into pane id (single batch).  Stack: ( id -- id ).
-: mb-draw ( id -- id )
-    dup gpane-begin
+\ The pane controller agent: bind to the pane, render the complete set into ONE
+\ batch (`pause`ing each row so the console keeps its turn), present once, then
+\ WAIT for the pane's close event cooperatively. Runs as an agent (no args;
+\ reads mb-id). While it waits the worker keeps serving the console.
+: mb-agent ( -- )
+    mb-id @ (set-pane)              \ bind this agent to its pane (event routing)
+    mb-id @ gpane-begin             \ one batch for the whole image
     0x000000 gpane-clear
     180 0 do
         i mb-row !
@@ -58,31 +67,24 @@ variable mb-rgb
             0e  0e
             i        s>d d>f  mb-dx f*  -2.5e  f+
             mb-row @ s>d d>f  mb-dy f*  -1.25e f+
-            mb-maxiter fractal-iter    \ ( id -- id n )
-            mb-colour                  \ ( id n -- id rgb )
+            mb-maxiter fractal-iter    \ ( -- n )
+            mb-colour                  \ ( n -- rgb )
             mb-rgb !
             i mb-blk *   mb-row @ mb-blk *   mb-blk mb-blk   mb-rgb @
-            gpane-fill-rect            \ ( id )
+            gpane-fill-rect            \ ( -- )
         loop
+        pause                       \ <- yield each row so the console stays live
     loop
-    gpane-present
+    mb-id @ gpane-present           \ submit the complete image once
+    wait-close                      \ cooperatively wait until the pane closes
 ;
 
-\ Block until pane or IDE frame closes.
-: mb-wait ( id -- )
-    begin
-        dup -1 gpane-next-event
-        dup ev-close = swap ev-frame-close = or
-        >r  drop drop drop drop  r>
-    until
-    drop
-;
-
+\ Open the pane and spawn the drawing agent; returns immediately so the console
+\ stays interactive while the agent renders under the cooperative pump.
 : gfx-mandelbrot
     cr ." rendering Mandelbrot set ..." cr
-    480 360  S" ∴ Mandelbrot"  gpane-open
-    dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
-    mb-draw
-    ." done — close the window to exit" cr
-    mb-wait
+    480 360  S" ∴ Mandelbrot"  gpane-open  mb-id !
+    mb-id @ 0= if  ." (no UI substrate — demo skipped)" cr  exit then
+    ['] mb-agent agent drop
+    ." Mandelbrot rendering in the background — keep using the console." cr
 ;

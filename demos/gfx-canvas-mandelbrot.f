@@ -1,4 +1,5 @@
-\ gfx-canvas-mandelbrot.f — high-resolution Mandelbrot via the CANVAS.
+\ gfx-canvas-mandelbrot.f — high-resolution Mandelbrot via the CANVAS,
+\ driven by a COOPERATIVE AGENT so the Forth console stays live.
 \
 \ Where gfx-mandelbrot.f draws a 240 x 180 grid as one gpane-fill-rect
 \ per 2 x 2 block, this renders at FULL per-pixel resolution
@@ -18,6 +19,11 @@
 \
 \ FP stack protocol for fractal-iter ( maxiter -- n ), see igui_gfx.masm:
 \   push z0x z0y (both 0 for Mandelbrot), then cx cy, maxiter on data.
+\
+\ A controller agent renders one row per scheduler slice (`pause`s
+\ between rows), blits the finished frame, then WAITS for the pane's
+\ close event cooperatively — so the console stays responsive while the
+\ HD set draws, and the agent exits when the pane is closed.
 
 640 constant cm-w
 480 constant cm-h
@@ -34,6 +40,7 @@ cm-w cm-h *  4 *   buffer: cm-fb
 3.5e 640e f/   fconstant cm-dx
 2.5e 480e f/   fconstant cm-dy
 
+variable cm-id        \ the graphics pane id (so the no-arg agent can reach it)
 variable cm-row
 
 \ 16-step escape-time palette: deep navy -> ice-white -> amber -> black,
@@ -61,7 +68,8 @@ variable cm-row
     0xFF000000 or
 ;
 
-\ Compute every pixel into the framebuffer (no drawing yet).
+\ Compute every pixel into the framebuffer (no drawing yet).  `pause`s once
+\ per row so the cooperative pump keeps the console live as the frame fills.
 : cm-render ( -- )
     cm-h 0 do
         i cm-row !
@@ -73,25 +81,27 @@ variable cm-row
             cm-colour                                \ ( n -- argb )
             cm-row @ cm-w *  i +  4 *  cm-fb +  L!   \ store pixel
         loop
+        pause                                        \ <- yield each row so the console stays live
     loop
 ;
 
-\ Block until the pane (or the IDE frame) closes.
-: cm-wait ( id -- )
-    begin
-        dup -1 gpane-next-event
-        dup ev-close = swap ev-frame-close = or
-        >r  drop drop drop drop  r>
-    until
-    drop
+\ The pane controller agent: bind to the pane, render the full frame (pausing
+\ each row), upload it in ONE bulk canvas-blit, then WAIT for the pane's close
+\ event cooperatively. Runs as an agent (no args; reads cm-id). While it waits
+\ the worker keeps serving the console — wait, never block.
+: cm-agent  ( -- )
+    cm-id @ (set-pane)                  \ bind this agent to its pane (event routing)
+    cm-render
+    cm-id @ cm-fb cm-w cm-h canvas-blit \ one bulk upload — submits + repaints
+    wait-close                          \ cooperatively wait until the pane closes
 ;
 
-: gfx-canvas-mandelbrot
+\ Open the pane and spawn the drawing agent; returns immediately so the console
+\ stays interactive while the agent renders under the cooperative pump.
+: gfx-canvas-mandelbrot  ( -- )
     cr ." rendering " cm-w . ." x " cm-h . ." Mandelbrot via canvas ..." cr
-    cm-w cm-h  S" ∴ Mandelbrot HD"  gpane-open
-    dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
-    cm-render
-    dup cm-fb cm-w cm-h canvas-blit     \ one bulk upload — keeps id
-    ." done — close the window to exit" cr
-    cm-wait
+    cm-w cm-h  S" ∴ Mandelbrot HD"  gpane-open  cm-id !
+    cm-id @ 0= if  ." (no UI substrate — demo skipped)" cr  exit then
+    ['] cm-agent agent drop
+    ." Mandelbrot rendering in the background — keep using the console." cr
 ;

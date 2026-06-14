@@ -7,6 +7,12 @@
 \ default; WF64_NO_PIN turns it off). This is the same pinned loop the
 \ hot-mandel-iter bench measures, exercised in a real render.
 \
+\ Rendered by a COOPERATIVE PANE-AGENT: the entry word opens the pane and spawns
+\ a controller agent, then returns immediately so the Forth console stays live.
+\ The agent computes the whole framebuffer (pausing once per row so the console
+\ keeps its turn), uploads it in one blit, then WAITS for the pane's close event
+\ cooperatively. See docs/design/wf66_pane_agent_gui.md.
+\
 \ Fixed point: 8 fractional bits (1.0 = 256).
 \   real [-2.5 .. 1.0]   -> cx in [-640 .. 256]  (span 896)
 \   imag [-1.25 .. 1.25] -> cy in [-320 .. 320]  (span 640)
@@ -69,9 +75,11 @@ hotvariable hmc-cnt
     0xFF000000 or
 ;
 
+variable hmc-id        \ the canvas pane id (so the no-arg agent can reach it)
 variable hmc-yrow
 
-\ Compute every pixel into the framebuffer (no drawing yet).
+\ Compute every pixel into the framebuffer (no drawing yet). One `pause` per row
+\ keeps the cooperative pump serving the console while the image computes.
 : hmc-render ( -- )
     hmc-h 0 do
         i hmc-yrow !
@@ -82,26 +90,29 @@ variable hmc-yrow
             hmc-colour                               \ ( n -- argb )
             hmc-yrow @ hmc-w *  i +  4 *  hmc-fb +  L!
         loop
+        pause                       \ <- yield each row so the console stays live
     loop
 ;
 
-\ Block until the pane (or the IDE frame) closes.
-: hmc-wait ( id -- )
-    begin
-        dup -1 gpane-next-event
-        dup ev-close = swap ev-frame-close = or
-        >r  drop drop drop drop  r>
-    until
-    drop
+\ The pane controller agent: bind to the pane, compute the whole framebuffer
+\ (pausing per row), upload it in one bulk blit, then WAIT cooperatively for the
+\ pane's close event. Runs as an agent (no args; reads hmc-id).
+: hmc-agent ( -- )
+    hmc-id @ (set-pane)             \ bind this agent to its pane (event routing)
+    hmc-render
+    hmc-id @ hmc-fb hmc-w hmc-h canvas-blit   \ one bulk upload
+    ." done — close the window to exit" cr
+    wait-close                      \ cooperatively wait until the pane closes
 ;
 
+\ Open the pane and spawn the drawing agent; returns immediately so the console
+\ stays interactive while the agent renders under the cooperative pump.
 : hot-mandel-canvas
     cr ." rendering " hmc-w . ." x " hmc-h .
     ."  integer (register-pinned) Mandelbrot via canvas ..." cr
     hmc-w hmc-h  S" ∴ Hot Mandelbrot (pinned)"  gpane-open
     dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
-    hmc-render
-    dup hmc-fb hmc-w hmc-h canvas-blit     \ one bulk upload — keeps id
-    ." done — close the window to exit" cr
-    hmc-wait
+    hmc-id !
+    ['] hmc-agent agent drop
+    ." Mandelbrot rendering in the background — keep using the console." cr
 ;

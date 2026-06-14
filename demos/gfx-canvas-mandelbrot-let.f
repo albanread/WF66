@@ -14,6 +14,11 @@
 \ drives it (one LET call per iteration); the MASM version runs the
 \ whole escape loop in registers (one call per pixel).  Same picture,
 \ two codegen paths — compare the speed.
+\
+\ Driven by a COOPERATIVE PANE-AGENT: the controller binds the pane,
+\ fills the framebuffer one row per scheduler slice (`pause` per row),
+\ ships ONE canvas-blit, then WAITS for the pane's close event — so the
+\ Forth console stays fully live while the HD image renders.
 
 640 constant cml-w
 480 constant cml-h
@@ -30,6 +35,7 @@ cml-w cml-h *  4 *   buffer: cml-fb
 fvariable cml-cre
 fvariable cml-cim
 variable  cml-row
+variable  cml-id        \ the graphics pane id (so the no-arg agent can reach it)
 
 \ One Mandelbrot iteration, compiled to native SSE by LET.
 \ ( F: z_re z_im c_re c_im -- z_re' z_im' mag )
@@ -83,6 +89,9 @@ variable  cml-row
     0xFF000000 or
 ;
 
+\ Fill the framebuffer one row at a time, `pause`ing after each row so
+\ the cooperative pump keeps serving the console while the HD image
+\ renders.  Stack-neutral — exactly the same per-pixel math as before.
 : cml-render ( -- )
     cml-h 0 do
         i cml-row !
@@ -93,24 +102,27 @@ variable  cml-row
             cml-colour
             cml-row @ cml-w *  i +  4 *  cml-fb +  L!
         loop
+        pause                       \ <- yield each row so the console stays live
     loop
 ;
 
-: cml-wait ( id -- )
-    begin
-        dup -1 gpane-next-event
-        dup ev-close = swap ev-frame-close = or
-        >r  drop drop drop drop  r>
-    until
-    drop
+\ The pane controller agent: bind to the pane, fill the framebuffer
+\ (pausing each row), ship ONE bulk canvas-blit, then WAIT for the
+\ pane's close event cooperatively.  Runs as an agent (no args; reads
+\ cml-id).  While it waits the worker keeps serving the console.
+: cml-agent  ( -- )
+    cml-id @ (set-pane)             \ bind this agent to its pane (event routing)
+    cml-render
+    cml-id @ cml-fb cml-w cml-h canvas-blit   \ one bulk upload
+    wait-close                      \ cooperatively wait until the pane closes
 ;
 
+\ Open the pane and spawn the drawing agent; returns immediately so the
+\ console stays interactive while the agent renders under the pump.
 : gfx-canvas-mandelbrot-let
     cr ." rendering " cml-w . ." x " cml-h . ." Mandelbrot (LET / native) ..." cr
-    cml-w cml-h  S" ∴ Mandelbrot HD (LET)"  gpane-open
-    dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
-    cml-render
-    dup cml-fb cml-w cml-h canvas-blit       \ one bulk upload — keeps id
-    ." done — close the window to exit" cr
-    cml-wait
+    cml-w cml-h  S" ∴ Mandelbrot HD (LET)"  gpane-open  cml-id !
+    cml-id @ 0= if  ." (no UI substrate — demo skipped)" cr  exit then
+    ['] cml-agent agent drop
+    ." Mandelbrot rendering in the background — keep using the console." cr
 ;

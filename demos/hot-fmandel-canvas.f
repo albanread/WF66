@@ -7,6 +7,11 @@
 \ docs/design/fp-stack-register-cache.md. hotfvariable still inlines the body
 \ address, so f@/f! skip the variable-stub CALL.)
 \ Leave-free: once escaped the body stops counting but the bounded loop runs on.
+\
+\ Driven by a COOPERATIVE pane-agent: the controller binds the pane, renders the
+\ image one row per scheduler slice (`pause` each row so the Forth console stays
+\ live), blits the canvas, then WAITS for the pane's close event cooperatively.
+\ The entry word opens the pane, spawns the agent, and returns immediately.
 
 480 constant hfc-w
 360 constant hfc-h
@@ -25,6 +30,8 @@ hotfvariable hfc-cx
 hotfvariable hfc-cy
 variable hfc-cnt
 variable hfc-live
+
+variable hfc-id       \ the graphics pane id (so the no-arg agent can reach it)
 
 \ Register-pinned FP escape count (same maths as bench hot-fmandel).
 : hfc-iter ( maxiter -- count ; F: cx cy -- )
@@ -69,7 +76,12 @@ variable hfc-live
 
 variable hfc-yrow
 
-: hfc-render ( -- )
+\ The pane controller agent: bind to the pane, render the whole set into the
+\ canvas framebuffer one row per scheduler slice (`pause` each row so the Forth
+\ console keeps its turn), blit the canvas, then WAIT for the pane's close event
+\ cooperatively. Runs as an agent (no args; reads hfc-id) — wait, never block.
+: hot-fmandel-canvas-agent  ( -- )
+    hfc-id @ (set-pane)              \ bind this agent to its pane (event routing)
     hfc-h 0 do
         i hfc-yrow !
         hfc-w 0 do
@@ -79,25 +91,19 @@ variable hfc-yrow
             hfc-colour
             hfc-yrow @ hfc-w *  i +  4 *  hfc-fb +  L!
         loop
+        pause                       \ <- yield each row so the console stays live
     loop
+    hfc-id @ hfc-fb hfc-w hfc-h canvas-blit
+    wait-close                      \ cooperatively wait until the pane closes
 ;
 
-: hfc-wait ( id -- )
-    begin
-        dup -1 gpane-next-event
-        dup ev-close = swap ev-frame-close = or
-        >r  drop drop drop drop  r>
-    until
-    drop
-;
-
+\ Open the pane and spawn the drawing agent; returns immediately so the console
+\ stays interactive while the agent renders under the cooperative pump.
 : hot-fmandel-canvas
     cr ." rendering " hfc-w . ." x " hfc-h .
     ."  FP (register-pinned) Mandelbrot via canvas ..." cr
-    hfc-w hfc-h  S" ∴ Hot FP Mandelbrot (xmm-pinned)"  gpane-open
-    dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
-    hfc-render
-    dup hfc-fb hfc-w hfc-h canvas-blit
-    ." done — close the window to exit" cr
-    hfc-wait
+    hfc-w hfc-h  S" ∴ Hot FP Mandelbrot (xmm-pinned)"  gpane-open  hfc-id !
+    hfc-id @ 0= if  ." (no UI substrate — demo skipped)" cr  exit then
+    ['] hot-fmandel-canvas-agent agent drop
+    ." Mandelbrot rendering in the background — keep using the console." cr
 ;

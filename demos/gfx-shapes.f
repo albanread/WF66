@@ -13,6 +13,13 @@
 \ Colours pack as 24-bit RGB into one cell.  The `0x` / `0X`
 \ prefix forces hex parsing regardless of BASE, so colour
 \ constants read naturally.  Coordinates stay plain decimal.
+\
+\ The scene is drawn by a COOPERATIVE AGENT (a green thread) so the Forth
+\ console stays live: the entry word opens the pane and spawns the controller,
+\ then returns immediately. The agent binds itself to the pane, draws the whole
+\ scene into one batch, presents it, then WAITS for the pane's close event
+\ cooperatively — close the pane and the agent exits. See
+\ docs/design/wf66_pane_agent_gui.md.
 
 0x101418  constant BG
 0xFFCC66  constant AMBER
@@ -21,17 +28,17 @@
 0x76C893  constant MINT
 0xE0E4E8  constant CREAM
 
-: gfx-shapes
-    cr ." opening graphical pane ..." cr
+variable sh-id        \ the graphics pane id (so the no-arg agent can reach it)
 
-    \ Open a 480 x 360 window titled "Shapes".
-    480 360  S" ∴ Shapes"  gpane-open
-    dup 0= if
-        drop ." (no UI substrate — demo skipped)" cr exit
-    then
+\ The pane controller agent: bind to the pane, draw the static scene into ONE
+\ batch, present it, then WAIT for the pane's close event cooperatively. Runs as
+\ an agent (no args; reads sh-id). While it waits the worker keeps serving the
+\ console — wait, never block.
+: sh-agent  ( -- )
+    sh-id @ (set-pane)              \ bind this agent to its pane (event routing)
 
     \ Begin a draw batch for the new pane.
-    dup gpane-begin
+    sh-id @ gpane-begin
 
     \ Dark background.
     BG gpane-clear
@@ -54,7 +61,20 @@
 
     \ Commit the batch — paints next frame.
     gpane-present
-    drop  \ drop the pane id we kept on the stack
+    wait-close                      \ cooperatively wait until the pane closes
+;
 
+\ Open the pane and spawn the drawing agent; returns immediately so the console
+\ stays interactive while the agent draws under the cooperative pump.
+: gfx-shapes  ( -- )
+    cr ." opening graphical pane ..." cr
+
+    \ Open a 480 x 360 window titled "Shapes".
+    480 360  S" ∴ Shapes"  gpane-open  sh-id !
+    sh-id @ 0= if
+        ." (no UI substrate — demo skipped)" cr exit
+    then
+
+    ['] sh-agent agent drop
     ." done — see the Shapes window" cr
 ;

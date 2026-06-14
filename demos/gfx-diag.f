@@ -1,36 +1,43 @@
-\ gfx-diag.f — minimal gpane diagnostic.
+\ gfx-diag.f — minimal gpane diagnostic, driven by a COOPERATIVE AGENT.
 \
-\ Opens a pane, paints once, waits for ONE close event, exits.
-\ No locals, no case dispatch, no rect.  If the pane shows up
-\ with a circle inside, the basic gpane wiring works.  If not,
-\ open/begin/clear/fill-circle/present is broken.
+\ Opens a pane, paints once, waits (cooperatively) for the close event, exits.
+\ No locals, no case dispatch, no rect.  If the pane shows up with a circle
+\ inside, the basic gpane wiring works.  If not, open/begin/clear/fill-circle/
+\ present is broken.
+\
+\ A controller AGENT drives the pane so the Forth console stays live: the entry
+\ word opens the pane and spawns the agent, then returns immediately; the agent
+\ binds itself to the pane, paints once, then WAITS for the pane's close event
+\ cooperatively (close the pane and the agent exits, console live throughout).
 
-: gfx-diag
-    cr ." gfx-diag: opening pane" cr
+variable gfx-diag-id    \ the graphics pane id (so the no-arg agent can reach it)
 
-    320 240 S" ∴ Diag" gpane-open
-    dup 0= if drop ." no UI" cr exit then
+\ The pane controller agent: bind to the pane, paint once, then cooperatively
+\ wait for the pane's close.  Runs as an agent (no args; reads gfx-diag-id).
+: gfx-diag-agent  ( -- )
+    gfx-diag-id @ (set-pane)        \ bind this agent to its pane (event routing)
 
-    cr ." gfx-diag: pane id = " dup . cr
-
-    dup gpane-begin
+    gfx-diag-id @ gpane-begin
     0x202020 gpane-clear
     160 120 60 0xFFCC66 gpane-fill-circle
     gpane-present
 
-    cr ." gfx-diag: painted, entering event loop" cr
+    cr ." gfx-diag: painted, waiting for close" cr
 
-    \ Loop until close.  No more drawing.
-    begin
-        dup -1 gpane-next-event   \ ( id p4 p3 p2 p1 kind )
-        \ Print the kind we got so we can see in the console.
-        ." [diag] event kind = " dup . cr
-        dup ev-close = swap ev-frame-close = or
-        \ Stack now: ( id p4 p3 p2 p1 done? )
-        \ Drop the 4 params, leave done? on top.
-        >r drop drop drop drop r>
-    until
-
-    drop
+    wait-close                      \ cooperatively wait until the pane closes
     ." gfx-diag: done" cr
+;
+
+\ Open the pane and spawn the controller agent; returns immediately so the
+\ console stays interactive while the agent runs.
+: gfx-diag  ( -- )
+    cr ." gfx-diag: opening pane" cr
+
+    320 240 S" ∴ Diag" gpane-open
+    dup 0= if drop ." (no UI substrate — demo skipped)" cr exit then
+
+    cr ." gfx-diag: pane id = " dup . cr
+
+    gfx-diag-id !
+    ['] gfx-diag-agent agent drop
 ;
