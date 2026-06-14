@@ -194,14 +194,19 @@ fn run_drain_loop(mut session: wf64::Wf64Session) {
     use wf64::igui::channels::{self, IGuiEvent};
     use wf64::igui::fconsole;
 
-    // Cooperative-agent pump — GATED behind WF66_AGENTS (default OFF). When off,
-    // agents_on=false: the worker never converts to a fiber, never run-slices, and
-    // always blocks on next_event(200) — i.e. exactly the proven classic loop.
-    // When WF66_AGENTS is set, the worker becomes the operator fiber and advances
-    // agents with a RUST-side run_slice (operator stays on its native stack; only
-    // agents enter Forth). Experimental: the fiber<->forth_main/SEH interaction
-    // still needs GUI debugging, hence the gate.
-    let agents_on = std::env::var_os("WF66_AGENTS").is_some();
+    // Cooperative-agent pump — now ON BY DEFAULT (GUI-proven: boots clean, panes
+    // render, console stays live). The worker becomes the operator fiber and
+    // advances agents with a RUST-side run_slice (the operator stays on its native
+    // stack; only agents enter Forth). With NO agents (normal use) ready_count()==0,
+    // so the loop just blocks on next_event(200) — byte-equivalent to the classic
+    // loop. Escape hatch: set WF66_AGENTS=0 (or off/false) to force the classic
+    // non-fiber loop. (The old "register kernel procs with SEH" boot break was the
+    // benign 0x406D1388 thread-naming exception, not a real fault — see
+    // docs/design/wf66_pane_agent_gui.md.)
+    let agents_on = !matches!(
+        std::env::var("WF66_AGENTS").as_deref(),
+        Ok("0") | Ok("off") | Ok("OFF") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+    );
     if agents_on {
         let _ = session.eval("(agent-init) drop\n");
     }
