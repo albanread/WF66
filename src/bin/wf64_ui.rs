@@ -308,6 +308,13 @@ fn handle_worker_event(session: &mut wf64::Wf64Session, ev: wf64::igui::channels
                     "∴ WF66 optimizer: off"
                 });
             }
+            IGuiEvent::SurfaceReply { request_id, payload } => {
+                // Async GUI reply: route it to the awaiting agent's mailbox (a
+                // no-op if no agent awaits this id — already woken / timed out).
+                // The cross-thread half was the GUI thread's channels::push; this
+                // (post) half runs here on the worker, where the agent table lives.
+                wf64::agents::deliver_reply(request_id as u32, payload as u64);
+            }
             IGuiEvent::FrameClose => {
                 fconsole::append("∴ frame closing");
                 return false;

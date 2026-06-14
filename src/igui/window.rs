@@ -1372,6 +1372,7 @@ pub fn open_child(title: &str) -> Option<i64> {
 /// Open a child with an explicit initial pixel size. Pass 0 for
 /// either dimension to fall back to Windows' CW_USEDEFAULT.
 pub fn open_child_sized(title: &str, width: i32, height: i32) -> Option<i64> {
+    crate::agents::debug_assert_operator("open_child");
     let frame_raw = *FRAME_HWND.get()?;
     let frame = HWND(frame_raw as *mut _);
     let mut title_w: Vec<u16> = title.encode_utf16().collect();
@@ -1397,6 +1398,7 @@ pub fn open_child_sized(title: &str, width: i32, height: i32) -> Option<i64> {
 /// as `open_child`, but routes to the text-view class on the GUI
 /// thread (where state allocation + WM_MDICREATE happen safely).
 pub fn open_text_child(title: &str) -> Option<i64> {
+    crate::agents::debug_assert_operator("open_text_child");
     let frame_raw = *FRAME_HWND.get()?;
     let frame = HWND(frame_raw as *mut _);
     let mut title_w: Vec<u16> = title.encode_utf16().collect();
@@ -1420,6 +1422,7 @@ pub fn open_text_child(title: &str) -> Option<i64> {
 /// thread like `open_text_child`; the returned child id is the token
 /// Forth uses with `doc_pane::set_markdown` / `append_markdown`.
 pub fn open_doc_child(title: &str) -> Option<i64> {
+    crate::agents::debug_assert_operator("open_doc_child");
     let frame_raw = *FRAME_HWND.get()?;
     let frame = HWND(frame_raw as *mut _);
     let mut title_w: Vec<u16> = title.encode_utf16().collect();
@@ -1442,6 +1445,7 @@ pub fn open_doc_child(title: &str) -> Option<i64> {
 /// Open a help-pane MDI child browsing `path` (a docs folder, or a single
 /// `.md` file).  Marshals to the GUI thread like `open_text_child`.
 pub fn open_help_child(title: &str, path: &str) -> Option<i64> {
+    crate::agents::debug_assert_operator("open_help_child");
     let frame_raw = *FRAME_HWND.get()?;
     let frame = HWND(frame_raw as *mut _);
     let mut title_w: Vec<u16> = title.encode_utf16().collect();
@@ -1463,6 +1467,7 @@ pub fn open_help_child(title: &str, path: &str) -> Option<i64> {
 }
 
 pub fn close_child(child_id: i64) -> bool {
+    crate::agents::debug_assert_operator("close_child");
     let Some(frame_raw) = FRAME_HWND.get() else {
         return false;
     };
@@ -1485,6 +1490,7 @@ pub fn close_child(child_id: i64) -> bool {
 /// Marshal `spec` to the GUI thread, where it's parsed and installed
 /// as the frame's menu bar. Returns true on success.
 pub fn set_menu(spec: &str) -> bool {
+    crate::agents::debug_assert_operator("set_menu");
     let Some(frame_raw) = FRAME_HWND.get() else {
         return false;
     };
@@ -1508,6 +1514,7 @@ pub fn set_menu(spec: &str) -> bool {
 /// clears the timer; otherwise WM_TIMER fires every `interval_ms`
 /// milliseconds and the render host pushes an `EvTick` event.
 pub fn set_redraw_rate(child_id: i64, interval_ms: i64) -> bool {
+    crate::agents::debug_assert_operator("set_redraw_rate");
     let Some(render_hwnd) = registry::render_hwnd_of(child_id) else {
         return false;
     };
@@ -1601,6 +1608,7 @@ pub(crate) fn post_crash_flush() {
 
 /// Marshal an MDI verb to the GUI thread for execution.
 pub fn dispatch_mdi_verb(verb: super::menu::MdiVerb) {
+    crate::agents::debug_assert_operator("dispatch_mdi_verb");
     let Some(frame_raw) = FRAME_HWND.get() else {
         return;
     };
@@ -1617,6 +1625,7 @@ pub fn dispatch_mdi_verb(verb: super::menu::MdiVerb) {
 }
 
 pub fn set_child_title(child_id: i64, title: &str) {
+    crate::agents::debug_assert_operator("set_child_title");
     let Some(frame_raw) = FRAME_HWND.get() else {
         return;
     };

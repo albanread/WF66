@@ -2823,6 +2823,7 @@ fn decode_event(
         | IGuiEvent::ForthRestart
         | IGuiEvent::ForthInterrupt
         | IGuiEvent::SetWf66 { .. }
+        | IGuiEvent::SurfaceReply { .. }
         | IGuiEvent::ReplSubmit { .. } => (EV_NONE, 0, 0, 0, 0),
     }
 }

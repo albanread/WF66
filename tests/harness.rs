@@ -7637,3 +7637,68 @@ fn agents_async_reply_wait_not_block() {
     assert_eq!(String::from_utf8_lossy(&a_fin), "R", "A woke after its reply and finished");
     assert_eq!(wf64::agents::ready_count(), 0, "all agents idle/done");
 }
+
+#[cfg(windows)]
+#[test]
+fn channels_surface_reply_survives_a_pane_filter() {
+    // Audit fix: a SurfaceReply is liveness-critical, so the main worker drain
+    // (next_event) must return it even when a legacy pane filter is active — it
+    // must never be stashed/lost. (matches_filter -> true.)
+    use wf64::igui::channels::{self, IGuiEvent};
+    channels::install();
+    channels::discard_stashed_events();
+    channels::filter_on_window(4242); // pretend a pane consumer is filtering
+    channels::push(IGuiEvent::SurfaceReply { request_id: 7, payload: 123 });
+    let ev = channels::next_event(200);
+    channels::clear_filter();
+    match ev {
+        Some(IGuiEvent::SurfaceReply { request_id, payload }) => {
+            assert_eq!((request_id, payload), (7, 123));
+        }
+        other => panic!("SurfaceReply lost under a pane filter; got {other:?}"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn agents_surface_reply_end_to_end() {
+    // The full worker-side async-reply path, headless: the GUI thread pushes a
+    // SurfaceReply onto the event channel; the pump drains it and routes it via
+    // deliver_reply; the awaiting agent wakes. This is exactly the wiring the IDE
+    // pump uses (channels::push on the GUI thread, deliver_reply on the worker).
+    use wf64::igui::channels::{self, IGuiEvent};
+    channels::install();
+    channels::discard_stashed_events();
+
+    let mut s = sess();
+    s.eval("\
+(agent-init) drop\n\
+: awaiter  1 (set-pane)  42 await-reply drop  .\" done\" ;\n\
+' awaiter agent drop\n").unwrap();
+
+    // The agent parks awaiting request 42.
+    wf64::agents::run_slice();
+    assert!(wf64::agents::take_pane_output(1).unwrap().is_empty(), "parked, no output yet");
+    assert_eq!(wf64::agents::pending_replies(), 1, "request 42 outstanding");
+
+    // GUI thread answers -> push. Pump step: drain the event, route via deliver_reply.
+    channels::push(IGuiEvent::SurfaceReply { request_id: 42, payload: 0x77 });
+    match channels::next_event(200) {
+        Some(IGuiEvent::SurfaceReply { request_id, payload }) => {
+            assert!(
+                wf64::agents::deliver_reply(request_id as u32, payload as u64),
+                "deliver_reply should find the awaiting agent",
+            );
+        }
+        other => panic!("pump did not receive the SurfaceReply; got {other:?}"),
+    }
+
+    // The agent wakes, receives, and finishes.
+    for _ in 0..4 { wf64::agents::run_slice(); }
+    assert_eq!(
+        String::from_utf8_lossy(&wf64::agents::take_pane_output(1).unwrap()),
+        "done",
+        "agent woke from the SurfaceReply and finished",
+    );
+    assert_eq!(wf64::agents::ready_count(), 0, "all agents done");
+}

@@ -486,3 +486,18 @@ pub fn deliver_reply(request_id: u32, payload: u64) -> bool {
 pub fn pending_replies() -> usize {
     REQ_AGENTS.with(|m| m.borrow().len())
 }
+
+/// Debug tripwire for the wait-never-block invariant: a blocking GUI round-trip
+/// (`SendMessageW`) must NEVER run on an agent fiber — it would freeze every pane.
+/// Only the operator (aid 0) / non-agent host code may call the blocking helpers.
+/// Compiles out in release; in debug/test a violation aborts with a clear message
+/// instead of silently freezing the IDE. See docs/design/wf66_pane_agent_gui.md §9.
+#[inline]
+pub fn debug_assert_operator(site: &str) {
+    debug_assert!(
+        rt_agent_self() == 0,
+        "{site}: blocking GUI round-trip on agent {} — convert it to the async \
+         (await-reply / PostMessage-owned-payload) path before an agent calls it",
+        rt_agent_self(),
+    );
+}

@@ -181,6 +181,16 @@ pub enum IGuiEvent {
     SetWf66 {
         on: bool,
     },
+    /// Async answer to a synchronous-style GUI query (text measure / hit-test)
+    /// that an agent is awaiting. The GUI thread computes the result and pushes
+    /// this; the worker pump routes it to the awaiting agent's mailbox via
+    /// `agents::deliver_reply` (the cross-thread half is this push, the
+    /// thread-local `(post)` half runs on the worker). `payload` is the encoded
+    /// reply value. See docs/design/wf66_pane_agent_gui.md §5.
+    SurfaceReply {
+        request_id: i64,
+        payload: i64,
+    },
 }
 
 struct Mailbox {
@@ -286,6 +296,9 @@ fn matches_filter(ev: &IGuiEvent, filter: &HashSet<i64>) -> bool {
     match ev {
         IGuiEvent::FrameClose | IGuiEvent::ThemeChange | IGuiEvent::EvalBuffer { .. } | IGuiEvent::ForthRestart | IGuiEvent::ForthInterrupt | IGuiEvent::SetWf66 { .. } => true,
         IGuiEvent::Menu { .. } => true,
+        // A SurfaceReply is liveness-critical for an awaiting agent: the main
+        // worker drain (the pump) must always receive it, never stash it.
+        IGuiEvent::SurfaceReply { .. } => true,
         IGuiEvent::Key { child_id, .. }
         | IGuiEvent::Char { child_id, .. }
         | IGuiEvent::Mouse { child_id, .. }
@@ -328,6 +341,9 @@ fn matches_target(ev: &IGuiEvent, target: i64) -> bool {
         | IGuiEvent::ForthInterrupt
         | IGuiEvent::SetWf66 { .. }
         | IGuiEvent::ReplSubmit { .. }
+        // A SurfaceReply is for the worker pump, not a pane-targeted consumer;
+        // keep it in the stash so the main drain (pump) picks it up.
+        | IGuiEvent::SurfaceReply { .. }
         | IGuiEvent::DpiChange { .. } => false,
         // Per-window events only match when their child_id is target.
         IGuiEvent::Key { child_id, .. }

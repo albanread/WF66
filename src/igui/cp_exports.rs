@@ -1281,6 +1281,11 @@ fn write_event(
             // C-ABI consumers get the EVAL_BUFFER catch-all (no payload).
             k = kind::EVAL_BUFFER;
         }
+        IGuiEvent::SurfaceReply { .. } => {
+            // Consumed by the wf64-ui worker pump on the Rust path; C-ABI
+            // consumers just see the kind tag (no payload meaningful to them).
+            k = kind::SURFACE_REPLY;
+        }
     }
 
     unsafe {
