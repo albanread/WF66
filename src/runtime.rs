@@ -3706,6 +3706,12 @@ fn with_code_assembler<R>(
 
 /// Write to current output. Buffered: append to vec. Live: stdout + flush.
 fn write_bytes(bytes: &[u8]) {
+    // Pane-agent routing (stage 1): a pane-bound agent's output goes to its own
+    // per-pane buffer, not the shared session I/O. The operator and unbound
+    // agents fall through to the normal path. See docs/design/wf66_pane_agent_gui.md.
+    if crate::agents::route_output(bytes) {
+        return;
+    }
     with_current_io(|io| match io {
         Io::Buffered { output, .. } => output.extend_from_slice(bytes),
         Io::Live { .. } => {

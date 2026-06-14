@@ -61,6 +61,14 @@ struct Slot {
     mailbox: VecDeque<u64>,
     /// True while the agent is in the ready queue (dedup guard).
     ready: bool,
+    /// Pane binding: the `child_id` this agent drives, or -1 if unbound. When
+    /// bound (>= 0) the agent's output routes to its pane buffer (`out`) instead
+    /// of the shared session I/O — see `route_output` and
+    /// docs/design/wf66_pane_agent_gui.md (stage 1).
+    child_id: i64,
+    /// Per-agent output buffer (the pane transcript), drained by the host pump's
+    /// flush step (`take_pane_output`). Only filled while `child_id >= 0`.
+    out: Vec<u8>,
     /// Backing storage for the agent's Forth stacks (kept alive; grows downward
     /// from the *_top addresses baked into `_ctx`). Empty for the operator.
     _ds: Vec<u64>,
@@ -142,6 +150,8 @@ pub extern "C" fn rt_agent_init() -> u64 {
             handler: 0,
             mailbox: VecDeque::new(),
             ready: false,
+            child_id: -1, // operator is never a pane
+            out: Vec::new(),
             _ds: Vec::new(),
             _ls: Vec::new(),
             _fp: Vec::new(),
@@ -177,6 +187,8 @@ pub extern "C" fn rt_agent_spawn(entry_xt: u64) -> u64 {
             handler: 0,  // no catch handler installed yet
             mailbox: VecDeque::new(),
             ready: false,
+            child_id: -1, // unbound until (set-pane); output uses the shared buffer
+            out: Vec::new(),
             _ds: ds,
             _ls: ls,
             _fp: fp,
@@ -370,4 +382,64 @@ pub extern "C" fn rt_agent_is_done(aid: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn rt_agent_self() -> u64 {
     CURRENT.with(|c| c.get()) as u64
+}
+
+// ── Per-agent pane binding + output routing (pane-agent GUI, stage 1) ────────
+// See docs/design/wf66_pane_agent_gui.md §2/§7. A pane's agent binds itself to a
+// child_id; thereafter its output routes to a per-agent buffer the host pump
+// flushes to that pane, instead of the one shared session transcript.
+
+/// `(set-pane) ( child_id -- )` — bind the RUNNING agent to a pane `child_id`.
+/// A negative value unbinds (output falls back to the shared session I/O).
+#[no_mangle]
+pub extern "C" fn rt_agent_set_pane(child_id: u64) -> u64 {
+    let cur = CURRENT.with(|c| c.get());
+    AGENTS.with(|a| {
+        if let Some(s) = a.borrow_mut().get_mut(cur) {
+            s.child_id = child_id as i64;
+        }
+    });
+    0
+}
+
+/// Route output bytes to the running agent's pane buffer when it is BOUND to a
+/// pane (`child_id >= 0`). Returns true if consumed here; false means the caller
+/// should use the normal session I/O — i.e. the operator (aid 0) or an unbound
+/// agent (e.g. the headless round-robin fixtures). Cooperative single-threading
+/// makes "the running agent" unambiguous at every write, so no lock is needed.
+pub fn route_output(bytes: &[u8]) -> bool {
+    let cur = CURRENT.with(|c| c.get());
+    if cur == 0 {
+        return false; // the operator never routes to a pane
+    }
+    AGENTS.with(|a| {
+        let mut a = a.borrow_mut();
+        match a.get_mut(cur) {
+            Some(s) if s.child_id >= 0 => {
+                s.out.extend_from_slice(bytes);
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Drain the accumulated output for the agent bound to `child_id` (the pump's
+/// flush step; tests read it directly). `None` if no agent is bound to that pane;
+/// an empty `Vec` if bound but nothing is buffered.
+pub fn take_pane_output(child_id: i64) -> Option<Vec<u8>> {
+    if child_id < 0 {
+        return None;
+    }
+    AGENTS.with(|a| {
+        a.borrow_mut()
+            .iter_mut()
+            .find(|s| s.child_id == child_id)
+            .map(|s| std::mem::take(&mut s.out))
+    })
+}
+
+/// The `child_id` agent `aid` is bound to, or -1 if unbound/unknown.
+pub fn agent_pane(aid: u64) -> i64 {
+    AGENTS.with(|a| a.borrow().get(aid as usize).map_or(-1, |s| s.child_id))
 }

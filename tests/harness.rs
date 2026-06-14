@@ -7561,3 +7561,38 @@ bye\n";
     assert!(out.contains("6.0"), "FP across pauses failed; out={out:?}");
     assert!(out.contains("42"), "mailbox receive failed; out={out:?}");
 }
+
+#[test]
+fn agents_per_pane_output_routing() {
+    // Pane-agent GUI, stage 1: an agent BOUND to a pane (via `(set-pane)`) routes
+    // its output to that pane's own buffer, keyed by child_id — not the shared
+    // session transcript. Two agents bind distinct child_ids and emit their own
+    // text; the per-pane streams must be isolated and must NOT leak into the
+    // shared output. (Unbound agents keep the shared buffer — agents_round_robin.)
+    let prog = "\
+(agent-init) drop\n\
+: paneA  10 (set-pane)  .\" A-out\" ;\n\
+: paneB  20 (set-pane)  .\" B-out\" ;\n\
+' paneA agent drop\n\
+' paneB agent drop\n\
+run-until-idle\n";
+    let mut s = sess();
+    let out = s.eval(prog).unwrap();
+
+    let a = wf64::agents::take_pane_output(10).expect("an agent is bound to pane 10");
+    let b = wf64::agents::take_pane_output(20).expect("an agent is bound to pane 20");
+    assert_eq!(String::from_utf8_lossy(&a), "A-out", "pane 10 buffer");
+    assert_eq!(String::from_utf8_lossy(&b), "B-out", "pane 20 buffer");
+
+    // The shared session output must not carry the per-pane text.
+    assert!(!out.contains("A-out"), "A-out leaked into shared output: {out:?}");
+    assert!(!out.contains("B-out"), "B-out leaked into shared output: {out:?}");
+
+    // Draining is one-shot (the pump flushes, then the buffer is empty).
+    assert!(
+        wf64::agents::take_pane_output(10).unwrap().is_empty(),
+        "second drain of pane 10 should be empty",
+    );
+    // An unbound / unknown pane has no agent bound.
+    assert!(wf64::agents::take_pane_output(99).is_none(), "pane 99 is unbound");
+}

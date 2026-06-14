@@ -127,3 +127,14 @@ proc(mailbox_pop_word)
     sub     rbp, cell
     next()
 endp()
+
+; (set-pane)  ( child_id -- )   bind the running agent to a pane child_id, so its
+;     output routes to that pane's buffer (negative = unbound). See src/agents.rs
+;     rt_agent_set_pane and docs/design/wf66_pane_agent_gui.md (stage 1).
+proc(agent_set_pane_word)
+    mov     rcx, rax                        ; arg = child_id (TOS)
+    win64_call(rt_agent_set_pane)
+    mov     rax, [rbp]                      ; drop child_id: raise NOS
+    add     rbp, cell
+    next()
+endp()
