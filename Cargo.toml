@@ -118,6 +118,19 @@ required-features = ["opt-metrics"]
 name = "newfactor-ui"
 path = "src/bin/newfactor_ui.rs"
 
+# Headless keystone for the cooperative-agents work: reproduces the
+# fiber <-> forth_main-RSP-reroute <-> SEH/VEH interaction with no window
+# (the coverage gap the IDE-pump revert named).  Run-only, not a #[test].
+[[bin]]
+name = "fiber-seh-repro"
+path = "src/bin/fiber_seh_repro.rs"
+
+# Headless Direct2D image renderer: renders gpane SurfaceCmd batches to PNG
+# with no window (docs art / CI baselines / D2D-on-a-fiber probe).
+[[bin]]
+name = "gfx-render"
+path = "src/bin/gfx_render.rs"
+
 [profile.dev]
 debug = 1
 

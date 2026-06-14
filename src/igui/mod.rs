@@ -47,6 +47,7 @@ pub mod stack_view;
 pub mod crash_view;
 pub mod crash_handler;
 mod menu;
+pub mod offscreen;
 pub(crate) mod fedit;
 pub(crate) mod rope_buffer;
 mod registry;
