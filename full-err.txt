@@ -1,0 +1,52 @@
+┌─── WF64 Forth crash dump ──────────────────────────────────────────────
+│ exception : 0x406D1388  (see Windows status codes for hex)
+│ at word   : 00007FFDD7461B6A  <?>
+│
+│ CPU  rax=0000000000000000 rbx=000000C35AC0FB30 rcx=0000000000000000
+│      rdx=0000000000000000 rsi=0000000000000000 rdi=00000000406D1388
+│      rbp=0000000000000006 rsp=000000C35AC0FA10 rip=00007FFDD7461B6A
+│      r8 =000000C359B5E000 r9 =0000B76FFFC6A309 r10=00007FFDDA191490
+│      r11=0000B76FFFC6BD19 r12=0000000000000000 r13=0000000000000000
+│      r14=0000000000000000 r15=0000000000000000 flags=00000202
+│
+│ raw stack (32 qwords from rsp):
+│   [rsp+  0] 0000000000000000  
+│   [rsp+  8] 000000C35AC0FB30  
+│   [rsp+ 16] 0000000000000000  
+│   [rsp+ 24] 00000000406D1388  
+│   [rsp+ 32] 00000080406D1388  
+│   [rsp+ 40] 0000000000000000  
+│   [rsp+ 48] 00007FFDD7461B6A  
+│   [rsp+ 56] 0000000000000006  
+│   [rsp+ 64] 0000000000001000  
+│   [rsp+ 72] 00007FFDC34EDA40  
+│   [rsp+ 80] 00000000FFFFFFFF  
+│   [rsp+ 88] 0000000000000000  
+│   [rsp+ 96] 0000000000000000  
+│   [rsp+104] 00007FFDC2AAEFE2  
+│   [rsp+112] 0000000000000000  
+│   [rsp+120] 0000000000000000  
+│   [rsp+128] 0000000000000000  
+│   [rsp+136] 0000000000000000  
+│   [rsp+144] 0000000000000000  
+│   [rsp+152] 0000000000000000  
+│   [rsp+160] 0000000000000000  
+│   [rsp+168] 0000000000000000  
+│   [rsp+176] 0000000000000000  
+│   [rsp+184] 0000000000000000  
+│   [rsp+192] 000077E3F1B5CDB5  
+│   [rsp+200] 0000000000000000  
+│   [rsp+208] 0000000000000000  
+│   [rsp+216] 0000000000000000  
+│   [rsp+224] 0000000000000000  
+│   [rsp+232] 0000000000000000  
+│   [rsp+240] 000001F22110C720  
+│   [rsp+248] 00007FFDC2AAEFBC  
+└───────────────────────────────────────────────────────────────────────
+[igui-hwnd] post-create child=2 mdi=HWND(0x160b22) valid=true visible=false size=0x0 registry_match=true render=HWND(0xf0a24) valid=true visible=false size=0x0 registry_match=true parent=HWND(0x160b22) parent_matches=true
+[wf66-demo] loaded demos/gfx-mandel-live.f (agents ready: 1)
+[igui-paint] hwnd=HWND(0xf0a24) rcPaint=(0, 0)-(464, 321) fErase=false
+[igui-hwnd] first-paint child=2 mdi=HWND(0x160b22) valid=true visible=true size=464x321 registry_match=true render=HWND(0xf0a24) valid=true visible=true size=464x321 registry_match=true parent=HWND(0x160b22) parent_matches=true
+[igui-paint] hwnd=HWND(0xf0a24) rcPaint=(0, 0)-(464, 321) fErase=false
+[igui-batch-ui] child=2 seq=1 flags=0 cmds=43201
+[igui-paint] hwnd=HWND(0xf0a24) rcPaint=(370, 0)-(464, 321) fErase=false
