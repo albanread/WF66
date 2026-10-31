@@ -15,7 +15,6 @@ create regs 11 cells allot
 : 32>s ( u -- n ) 4294967295 and dup 2147483648 and if 4294967296 - then ;
 : swi# ( c-addr u -- n ) (swi#) ;
 : xswi ( n -- err|0 ) regs swap (swi) ;
-: zcount ( c-addr -- c-addr u ) 0 begin 2dup + c@ while 1+ repeat ;
 : .error ( err -- ) 4 + zcount type ;
 : swi ( n -- ) xswi ?dup if cr .error cr -2 throw then ;
 : >regs ( x0 .. xk-1 k -- ) regs 10 cells 0 fill  dup 0 ?do dup i - pick regs i cells + ! loop  0 ?do drop loop ;
