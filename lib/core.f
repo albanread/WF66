@@ -593,9 +593,9 @@ tools-wordlist set-current
     begin
         2dup find-name
         0= if
-            2drop -1                ( c-addr u -1 ) — stop
+            2drop -1                ( c-addr u -1 ) \ stop
         else
-            drop forget_last 0      ( c-addr u 0 ) — continue
+            drop forget_last 0      ( c-addr u 0 ) \ continue
         then
     until
     2drop ;

@@ -641,6 +641,8 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("(ivar-store,)",  "ivar_store_comp",  0),
     ("largest",    "largest",    0),
     ("number?",    "number_q",   0),
+    ("float?",     "float_q",    0),
+    ("sliteral",   "sliteral",   0),
     ("accept",     "accept",     0),
     // Execute & interp
     ("execute",    "execute",    0),
@@ -750,7 +752,6 @@ pub const KERNEL_HELPERS: &[&str] = &[
     "inline_unloop_comp",
     "literal",
     "fliteral",
-    "sliteral",
     "init_dictionary_overlay",
     "publish_primitive",
 ];

@@ -2834,30 +2834,31 @@ endp()
 ; sliteral  ( c-addr u -- )            [compile-time only, not in dict]
 ;     Compile call do_slit ; .quad len ; <len bytes> at HERE.
 proc(sliteral)
+    ; ( c-addr u -- )  The bytes go to data space (VAR_HERE, the RW region:
+    ; in the BOX a RISC OS dynamic area, so the string can go to a SWI),
+    ; NUL-terminated and the pointer realigned to a cell; then the address
+    ; and the length are compiled as two literals.
     mov     rsi, [DSP]                       ; source addr
     mov     rcx, TOS                         ; len
-    mov     r8, [UP + user_HERE]
-    mov     byte ptr [r8], 0xE8
-    lea     r9, [rip + do_slit]
-    sub     r9, r8
-    sub     r9, 5
-    mov     dword ptr [r8 + 1], r9d
-    mov     [r8 + 5], rcx
-    lea     rdi, [r8 + 13]
-    xor     r10, r10
-.copy_loop:
-    cmp     r10, rcx
-    jae     .copied
-    mov     al, byte ptr [rsi + r10]
-    mov     byte ptr [rdi + r10], al
-    inc     r10
-    jmp     .copy_loop
-
-.copied:
-    add     rdi, rcx
-    mov     [UP + user_HERE], rdi
-    mov     TOS, [DSP + cell]
-    add     DSP, 2*cell
+    mov     rdi, [UP + user_VAR_HERE]
+    lea     r9, [rdi + rcx + 16]
+    cmp     r9, [UP + user_VAR_LIMIT]
+    ja      .overflow
+    mov     r8, rdi                          ; the string's new home
+    rep     movsb
+    mov     byte ptr [rdi], 0
+    add     rdi, 8
+    and     rdi, -8
+    mov     [UP + user_VAR_HERE], rdi
+    mov     rcx, TOS                         ; len again
+    mov     [DSP], rcx                       ; ( len addr )
+    mov     TOS, r8
+    call    literal                          ; compile addr  ( len )
+    call    literal                          ; compile len   ( )
+    next()
+.overflow:
+    mov     TOS, -8
+    call    throw_word
     next()
 endp()
 

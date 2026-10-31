@@ -49,8 +49,7 @@ fn message(e: &anyhow::Error) -> String {
     format!("{e:#}").lines().next().unwrap_or("").to_string()
 }
 
-mod wrap;
-use wrap::wrap_source;
+use f66_host::wrap::wrap_source;
 
 /// Install the host's hooks (a table that lives as long as the program).
 #[no_mangle]

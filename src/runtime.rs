@@ -538,6 +538,14 @@ pub extern "win64" fn rt_slurp_file(path_addr: u64, path_len: u64) -> u64 {
         Some(h) if h.file_open.is_some() => host_read_file(h, path_str.trim().as_bytes()),
         _ => std::fs::read(path_str.trim()).ok(),
     };
+    // In the box, if, do and the rest work outside a definition in an
+    // included file too, as in MF66 (f66-host's wrap).
+    let read = match read {
+        Some(b) if STRICT_UNDEFINED.load(std::sync::atomic::Ordering::Relaxed) => {
+            Some(f66_host::wrap::wrap_source(&String::from_utf8_lossy(&b), false).into_bytes())
+        }
+        r => r,
+    };
     match read.ok_or(()) {
         Ok(bytes) => SLURP_STACK.with(|s| {
             let mut stack = s.borrow_mut();
