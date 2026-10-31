@@ -24,8 +24,11 @@ variable zlen
 : (z,) ( c-addr u -- addr ) dup zlen ! here dup >r swap move  0 r@ zlen @ + c!  zlen @ 1+ allot r> ;
 : [char] ( "c" -- c ) char state @ if postpone literal then ; immediate
 : -lead ( c-addr u -- c-addr' u' ) begin dup if over c@ 32 = else 0 then while 1- swap 1+ swap repeat ;
-: z" ( "text" -- c-addr ) [char] " parse -lead (z,) state @ if postpone literal then ; immediate
+\ One space after z" or s" ends the word; the rest is the string's, as in
+\ MF66 (a leading space kept: s"  to do" is " to do")
+: skip-blank ( -- ) source >in @ > if >in @ + c@ 32 = if 1 >in +! then else drop then ;
+: z" ( "text" -- c-addr ) skip-blank [char] " parse (z,) state @ if postpone literal then ; immediate
 : swi" ( "name" -- n ) [char] " parse -lead (swi#) state @ if postpone literal then ; immediate
 \ s" strings in data space, so a SWI can be given them, as in MF66
 : (s,) ( c-addr u -- addr u ) dup >r here dup >r swap move r> r> dup allot ;
-: s" ( "text" -- addr u ) [char] " parse -lead (s,) state @ if swap postpone literal postpone literal then ; immediate
+: s" ( "text" -- addr u ) skip-blank [char] " parse (s,) state @ if swap postpone literal postpone literal then ; immediate

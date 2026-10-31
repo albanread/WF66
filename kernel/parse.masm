@@ -374,3 +374,17 @@ proc(accept)
     stk(2, 1)
     next()
 endp()
+
+; ACCEPT, the word  ( c-addr +n1 -- +n2 )
+;     What a program calls: under a host (the box) the line is the host's
+;     (OS_ReadLine, a task window's line, the console's), so it is typed by
+;     the user and not taken from the source being interpreted, which quit
+;     and refill go on reading through accept above. Without a host it is
+;     accept.
+proc(accept_word)
+    mov     rcx, [DSP]               ; arg1 = c-addr (NOS)
+    mov     rdx, TOS                 ; arg2 = +n1
+    win64_call(rt_accept)
+    stk(2, 1)
+    next()
+endp()

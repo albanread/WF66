@@ -841,8 +841,8 @@ forth-wordlist set-current
 private-wordlist set-current
 256 buffer: s-q-buf
 
-: s-q-getch  ( -- ch )
-    source drop >in @ + c@   1 >in +! ;
+: s-q-getch  ( -- ch )                  \ the closing " at the line's end
+    >in @ source nip < if source drop >in @ + c@   1 >in +! else 34 then ;
 
 : s-q-hex-digit  ( ch -- n )
     dup [char] 0 [char] 9 1+ within if [char] 0 -
@@ -878,12 +878,13 @@ private-wordlist set-current
 forth-wordlist set-current
 : s\"
     s-q-buf 0                            ( dst count )
+    source >in @ > if >in @ + c@ 32 = if 1 >in +! then else drop then  \ the one space after s\"
     begin
         s-q-getch
         dup [char] " <>
     while
         dup 92 = if drop s-q-escape then     ( 92 = '\' literal )
-        2 pick over + c!
+        2 pick 2 pick + c!                   ( dst count )
         1+
     repeat
     drop

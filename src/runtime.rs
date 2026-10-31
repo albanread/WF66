@@ -354,6 +354,22 @@ pub extern "win64" fn rt_bye(_code: u64) -> u64 {
 ///
 /// # Safety
 /// The kernel's `accept` guarantees `[buf, buf+cap)` is writable.
+/// ACCEPT as a program calls it: under a host (the box) the host's line --
+/// OS_ReadLine, a task window's or the console's -- with -1 (Escape) an
+/// empty line, as MF66's accept has it; without one, `rt_read_line`. The
+/// interpreter's own reading of its source stays on `rt_read_line`.
+#[no_mangle]
+pub extern "win64" fn rt_accept(buf: u64, cap: u64) -> u64 {
+    if let Some(read) = f66_host::hooks().and_then(|h| h.read_line) {
+        if buf == 0 || cap == 0 || cap as i64 <= 0 {
+            return 0;
+        }
+        let n = read(buf as *mut u8, cap as usize);
+        return if n < 0 { 0 } else { (n as u64).min(cap) };
+    }
+    rt_read_line(buf, cap)
+}
+
 #[no_mangle]
 pub extern "win64" fn rt_read_line(buf: u64, cap: u64) -> u64 {
     const EOF: u64 = u64::MAX;

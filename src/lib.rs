@@ -643,7 +643,7 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("number?",    "number_q",   0),
     ("float?",     "float_q",    0),
     ("sliteral",   "sliteral",   0),
-    ("accept",     "accept",     0),
+    ("accept",     "accept_word", 0),
     // Execute & interp
     ("execute",    "execute",    0),
     ("perform",    "perform",    0),
@@ -1687,6 +1687,7 @@ impl Wf64Session {
                 "rt_type"      => Some(runtime::rt_type      as *mut c_void),
                 "rt_bye"       => Some(runtime::rt_bye       as *mut c_void),
                 "rt_read_line" => Some(runtime::rt_read_line as *mut c_void),
+                "rt_accept"    => Some(runtime::rt_accept    as *mut c_void),
                 "rt_read_key"  => Some(runtime::rt_read_key  as *mut c_void),
                 "rt_key_q"     => Some(runtime::rt_key_q     as *mut c_void),
                 "rt_to_float"    => Some(runtime::rt_to_float    as *mut c_void),
