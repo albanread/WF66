@@ -17,6 +17,25 @@ rosgd's Makefile links it into the Intel `/init`. It needs the MF66 checkout
 beside this one (`../MF66`: the f66-host crate and the header) and JASM
 (`../JASM`), as checked out in BOX/src.
 
+### The exact commands
+
+From the checkouts in /Volumes/xc/BOX/src (the ordinary ones, not
+worktrees), on the Studio:
+
+    cd /Volumes/xc/BOX/src
+    git -C JASM pull --ff-only origin main
+    git -C MF66 pull --ff-only origin main
+    git -C NewGC pull --ff-only origin main
+    git -C WF66 pull --ff-only origin master
+    rustup target add x86_64-unknown-linux-musl --toolchain 1.97.1   # once
+    cd WF66 && sh box/build.sh
+
+It needs LLVM's `ld.lld` and `llvm-objcopy` (Homebrew's llvm@22). NewGC is
+github.com/albanread/GC-, checked out as `src/NewGC`. rosgd's Makefile
+(`MF66_GUEST` for ARCH x86_64) finds the library in
+`BOX/caches/wf66/out-x86_64`; `tools/build-intel-mac.sh` links it into the
+Intel ROM.
+
 ## How WF66 runs in /init
 
 - **Loader.** JASM's `NativeJit` on Linux: the kernel in an anonymous
