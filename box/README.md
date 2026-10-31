@@ -59,10 +59,13 @@ out as `NewGC`. `WF66_BOX_OUT=<dir>` writes elsewhere.
   user area, dictionary and compiled code) and the 32 MB code arena are
   mapped within rel32 reach of it (`jitmem::map_near`), never in the low
   4 GB, which is RISC OS's.
-- **Data space** (`here`, `allot`, `create`, variables, `z"` strings) is
-  the 16 MB region the host gives: the dynamic area "F66 Forth". Its
-  addresses are RISC OS addresses. The stacks, `pad` and `s"` strings are
-  not.
+- **Data space** (`here`, `allot`, `create`, variables, `s"` and `z"`
+  strings, compiled string literals) and the **stacks and user area**
+  (`pad`, the parse buffers) are in the region the host gives: the dynamic
+  area "F66 Forth", 16 MB and 768 KB. Their addresses are RISC OS addresses.
+- **Control structures outside a definition** (`3 0 do i . loop` at the
+  prompt or at a file's top level, included files too) are run as
+  `:noname ... ; execute`, by f66-host's `wrap`, which MF66 uses the same way.
 - **Calls to the host** keep the Win64 convention: `forth_main` and every
   `rt_*` function are `extern "win64"` (the same as `extern "C"` on
   Windows), so the kernel and the code generator are the same on both.
