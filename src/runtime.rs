@@ -366,6 +366,7 @@ pub extern "win64" fn rt_read_line(buf: u64, cap: u64) -> u64 {
     with_current_io(|io| match io {
         Io::Buffered { input, in_cursor, .. } => {
             if *in_cursor >= input.len() {
+                INPUT_ENDED.store(true, std::sync::atomic::Ordering::Relaxed);
                 return EOF;
             }
             // Find next LF (or end-of-input).
@@ -582,6 +583,18 @@ pub extern "win64" fn rt_swi(n: u64, regs: u64) -> u64 {
             NO_SWIS.as_ptr() as u64
         }
     }
+}
+
+static INPUT_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// quit's buffered input ran out (it then sets the bye flag itself, as at
+/// the end of a file): cleared by [`clear_input_ended`] before each run.
+pub fn input_ended() -> bool {
+    INPUT_ENDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn clear_input_ended() {
+    INPUT_ENDED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 static MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

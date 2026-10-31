@@ -22,6 +22,7 @@ create regs 11 cells allot
 : xsys ( x0 .. xk-1 k n -- err|0 ) >r >regs r> xswi ;
 variable zlen
 : (z,) ( c-addr u -- addr ) dup zlen ! here dup >r swap move  0 r@ zlen @ + c!  zlen @ 1+ allot r> ;
+: [char] ( "c" -- c ) char state @ if postpone literal then ; immediate
 : -lead ( c-addr u -- c-addr' u' ) begin dup if over c@ 32 = else 0 then while 1- swap 1+ swap repeat ;
 : z" ( "text" -- c-addr ) [char] " parse -lead (z,) state @ if postpone literal then ; immediate
 : swi" ( "name" -- n ) [char] " parse -lead (swi#) state @ if postpone literal then ; immediate

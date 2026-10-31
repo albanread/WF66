@@ -2730,6 +2730,7 @@ impl Wf64Session {
             Err(e) => return (Err(e), 0, String::new()),
         };
         let mut call_err: Result<()> = Ok(());
+        runtime::clear_input_ended();
         let (_, io_after) = runtime::with_io(io, || {
             call_err = self.call_xt(xt_quit);
         });
@@ -2774,9 +2775,10 @@ impl Wf64Session {
         Ok(out)
     }
 
-    /// The last run ended at `bye`.
+    /// The last run ended at `bye` (not at the end of its input, where
+    /// quit sets the same flag).
     pub fn bye_requested(&self) -> bool {
-        self.user_u64(USER_BYE_REQ) != 0
+        self.user_u64(USER_BYE_REQ) != 0 && !runtime::input_ended()
     }
 
     /// A definition is open (STATE is compiling).
