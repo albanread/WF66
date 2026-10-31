@@ -14,8 +14,8 @@ builds this crate with the box's pinned Rust (1.97.1) for
 x86_64-unknown-linux-musl and makes `BOX/caches/wf66/out-x86_64/libwf66-box.a`
 (every symbol but `mf66_box_*` local) and copies MF66's header beside it.
 rosgd's Makefile links it into the Intel `/init`. It needs the MF66 checkout
-beside this one (`../MF66-forth-intel`: the f66-host crate and the header)
-and JASM's branch box-linux-x64 (`../JASM-box-linux-x64`).
+beside this one (`../MF66`: the f66-host crate and the header) and JASM
+(`../JASM`), as checked out in BOX/src.
 
 ## How WF66 runs in /init
 

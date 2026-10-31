@@ -28,7 +28,7 @@ OBJCOPY=${OBJCOPY:-$(ls /opt/homebrew/opt/llvm@22/bin/llvm-objcopy 2>/dev/null |
 LLD=${LLD:-$(command -v ld.lld)}
 AR=${AR:-$(dirname "$OBJCOPY")/llvm-ar}
 [ -x "$AR" ] || AR=ar
-header=${MF66_HEADER:-$(ls "$here"/../../MF66-forth-intel/box/mf66_box.h "$here"/../../MF66/box/mf66_box.h 2>/dev/null | head -1)}
+header=${MF66_HEADER:-$here/../../MF66/box/mf66_box.h}
 [ -f "$header" ] || { echo "build.sh: no MF66 checkout with box/mf66_box.h beside this one (MF66_HEADER)" >&2; exit 1; }
 
 cd "$here"

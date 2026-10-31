@@ -14,7 +14,7 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 wf64 = { path = ".." }
-f66-host = { path = "../../MF66-forth-intel/host" }
+f66-host = { path = "../../MF66/host" }
 anyhow = "1"
 
 [profile.release]
