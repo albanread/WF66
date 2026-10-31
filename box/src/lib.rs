@@ -49,6 +49,9 @@ fn message(e: &anyhow::Error) -> String {
     format!("{e:#}").lines().next().unwrap_or("").to_string()
 }
 
+mod wrap;
+use wrap::wrap_source;
+
 /// Install the host's hooks (a table that lives as long as the program).
 #[no_mangle]
 pub extern "C" fn mf66_box_set_hooks(h: *const Hooks) {
@@ -64,8 +67,13 @@ pub extern "C" fn mf66_box_boot() -> i32 {
         // known is an error, as in MF66.
         wf64::runtime::set_strict_undefined(false);
         wf64::runtime::set_muted(true);
+        wf64::runtime::take_undefined_seen();
         let booted = Wf64Session::builtin();
         wf64::runtime::set_muted(false);
+        let unknown = wf64::runtime::take_undefined_seen();
+        if !unknown.is_empty() {
+            say(&format!("F66: the boot library does not know: {}\n", unknown.join(" ")));
+        }
         let mut s = match booted {
             Ok(s) => s,
             Err(e) => {
@@ -119,6 +127,7 @@ pub extern "C" fn mf66_box_line(p: *const u8, n: usize) -> i32 {
         let Some(s) = session() else { return -1 };
         let line = bytes(p, n).to_string();
         note_definitions(&line);
+        let line = wrap_source(&line, s.compiling());
         match s.eval_line(&line) {
             Ok(_) => s.bye_requested() as i32,
             Err(e) => {
@@ -139,6 +148,7 @@ pub extern "C" fn mf66_box_eval(p: *const u8, n: usize, name: *const u8, nlen: u
         // Copy: the text may be in a buffer the program itself reuses.
         let src = bytes(p, n).to_string();
         note_definitions(&src);
+        let src = wrap_source(&src, false);
         match s.eval_source(&src) {
             Ok(_) => s.bye_requested() as i32,
             Err((line, e)) => {
@@ -239,3 +249,4 @@ fn read_included(name: &str) -> Option<String> {
 fn note_definitions(text: &str) {
     console::note_definitions(text, &read_included);
 }
+

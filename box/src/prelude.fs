@@ -26,3 +26,6 @@ variable zlen
 : -lead ( c-addr u -- c-addr' u' ) begin dup if over c@ 32 = else 0 then while 1- swap 1+ swap repeat ;
 : z" ( "text" -- c-addr ) [char] " parse -lead (z,) state @ if postpone literal then ; immediate
 : swi" ( "name" -- n ) [char] " parse -lead (swi#) state @ if postpone literal then ; immediate
+\ s" strings in data space, so a SWI can be given them, as in MF66
+: (s,) ( c-addr u -- addr u ) dup >r here dup >r swap move r> r> dup allot ;
+: s" ( "text" -- addr u ) [char] " parse -lead (s,) state @ if swap postpone literal postpone literal then ; immediate

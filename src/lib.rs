@@ -764,6 +764,9 @@ const OFFSET_DSP_TOP:   u64 = 0x40000;
 const OFFSET_RSP_TOP:   u64 = 0x80000;
 const OFFSET_USER_BASE: u64 = 0x80000;
 const OFFSET_DICT_BASE: u64 = 0xC0000;
+/// The stacks and user area, when they are moved into a host's region.
+#[allow(dead_code)]
+const HOST_REGION_EXTRA: u64 = OFFSET_DICT_BASE;
 
 // Locals stack — a separate 1 MB region, R15 = LP grows downward.
 // Not constrained to the ±2 GB near-region (only relative addressing
@@ -1412,9 +1415,11 @@ mod posix {
         Ok(p as *mut c_void)
     }
 
-    /// The data region and whether the host gave it.
+    /// The data region and whether the host gave it. A host's region is
+    /// [`HOST_REGION_EXTRA`] longer: the stacks and the user area follow the
+    /// data space there, so they too have the host's addresses.
     pub(super) fn alloc_var_region(anchor: u64) -> Result<(*mut c_void, bool)> {
-        if let Some(p) = f66_host::region_alloc(VAR_REGION_SIZE) {
+        if let Some(p) = f66_host::region_alloc(VAR_REGION_SIZE + HOST_REGION_EXTRA as usize) {
             return Ok((p as *mut c_void, true));
         }
         let mut p = jitmem::map_near(anchor, VAR_REGION_SIZE, false);
@@ -1835,9 +1840,18 @@ impl Wf64Session {
             m
         };
 
-        let dsp_top   = region_u64 + OFFSET_DSP_TOP;
-        let rsp_top   = region_u64 + OFFSET_RSP_TOP;
-        let user_base = region_u64 + OFFSET_USER_BASE;
+        // The stacks and the user area (pad, the parse buffers) are the
+        // region's first 768 KB; under a host that gives the data region
+        // (the BOX) they are moved after its data space, so every buffer a
+        // program sees is in the host's (RISC OS's) memory. Nothing reaches
+        // them rip-relative: they are DSP-, RSP- and UP-relative.
+        #[cfg(not(windows))]
+        let stacks_base = if var_from_host { var_base + VAR_REGION_SIZE as u64 } else { region_u64 };
+        #[cfg(windows)]
+        let stacks_base = region_u64;
+        let dsp_top   = stacks_base + OFFSET_DSP_TOP;
+        let rsp_top   = stacks_base + OFFSET_RSP_TOP;
+        let user_base = stacks_base + OFFSET_USER_BASE;
         let dict_base = region_u64 + OFFSET_DICT_BASE;
         let debug_meta_base = region_u64 + REGION_SIZE as u64 - DEBUG_META_SIZE;
 

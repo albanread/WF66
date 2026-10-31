@@ -607,6 +607,14 @@ pub fn set_muted(on: bool) {
 
 static STRICT_UNDEFINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+static UNDEFINED_SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The undefined words met (and skipped) since the last call: the BOX
+/// reports any its boot library meets.
+pub fn take_undefined_seen() -> Vec<String> {
+    std::mem::take(&mut *UNDEFINED_SEEN.lock().unwrap())
+}
+
 /// Make an undefined word an error (the BOX, once its session has booted).
 pub fn set_strict_undefined(on: bool) {
     STRICT_UNDEFINED.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -618,6 +626,8 @@ pub fn set_strict_undefined(on: bool) {
 #[no_mangle]
 pub extern "win64" fn rt_undefined_word(addr: u64, len: u64) -> u64 {
     if !STRICT_UNDEFINED.load(std::sync::atomic::Ordering::Relaxed) {
+        let name = unsafe { std::slice::from_raw_parts(addr as *const u8, len as usize) };
+        UNDEFINED_SEEN.lock().unwrap().push(String::from_utf8_lossy(name).into_owned());
         return 0;
     }
     let name = unsafe { std::slice::from_raw_parts(addr as *const u8, len as usize) };
