@@ -36,6 +36,22 @@ github.com/albanread/GC-, checked out as `src/NewGC`. rosgd's Makefile
 `BOX/caches/wf66/out-x86_64`; `tools/build-intel-mac.sh` links it into the
 Intel ROM.
 
+## Rebuilding the library
+
+From the checkouts in BOX/src (WF66, with JASM, MF66 and NewGC beside it):
+
+    cd /Volumes/xc/BOX/src/WF66
+    git pull --ff-only origin master
+    (cd ../JASM && git pull --ff-only origin main)
+    (cd ../MF66 && git pull --ff-only origin main)
+    (cd ../NewGC && git pull --ff-only origin main)
+    sh box/build.sh
+
+This writes `BOX/caches/wf66/out-x86_64/libwf66-box.a` and MF66's
+`mf66_box.h`, which rosgd's Makefile links when it builds the Intel box
+(`tools/build-intel-mac.sh`). NewGC is github.com/albanread/GC-, checked
+out as `NewGC`. `WF66_BOX_OUT=<dir>` writes elsewhere.
+
 ## How WF66 runs in /init
 
 - **Loader.** JASM's `NativeJit` on Linux: the kernel in an anonymous
