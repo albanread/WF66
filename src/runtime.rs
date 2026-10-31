@@ -584,6 +584,35 @@ pub extern "win64" fn rt_swi(n: u64, regs: u64) -> u64 {
     }
 }
 
+static MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Drop what the host writer would be given (the BOX, while the library
+/// loads at boot: WF66's core.f marks a few Windows words it does not find).
+pub fn set_muted(on: bool) {
+    MUTED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+static STRICT_UNDEFINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make an undefined word an error (the BOX, once its session has booted).
+pub fn set_strict_undefined(on: bool) {
+    STRICT_UNDEFINED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The outer interpreter met a word it does not know. When strict (the
+/// BOX) that is an error, as in MF66: the name is printed and the kernel
+/// THROWs -13. Otherwise 0: the kernel prints "? " and goes on.
+#[no_mangle]
+pub extern "win64" fn rt_undefined_word(addr: u64, len: u64) -> u64 {
+    if !STRICT_UNDEFINED.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    let name = unsafe { std::slice::from_raw_parts(addr as *const u8, len as usize) };
+    write_bytes(name);
+    write_bytes(b" ");
+    1
+}
+
 /// `(swi#)`: a SWI's number from its name, or -1.
 #[no_mangle]
 pub extern "win64" fn rt_swi_number(addr: u64, len: u64) -> u64 {
@@ -3793,8 +3822,13 @@ fn write_bytes(bytes: &[u8]) {
     if crate::agents::route_output(bytes) {
         return;
     }
-    // A host writer (the BOX's VDU) gets output as it is made.
+    // A host writer (the BOX's VDU) gets output as it is made. quit's own
+    // " ok" after each line is left out: the host's REPL prints its own,
+    // and a file or the boot library must not print one per line.
     if let Some(write) = f66_host::hooks().and_then(|h| h.write) {
+        if bytes == b" ok\n" || MUTED.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         write(bytes.as_ptr(), bytes.len());
         return;
     }

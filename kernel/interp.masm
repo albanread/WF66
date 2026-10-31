@@ -100,7 +100,17 @@ proc(interpret_source)
     jnz     .got_float
 
     ; Not a number either. Stack: ( c-addr u 0 ), with the caller's
-    ; original TOS preserved at NNNOS. Drop all 3 and restore it.
+    ; original TOS preserved at NNNOS. Ask the host whether an undefined
+    ; word is an error (the BOX: it prints the name, and we THROW -13) or
+    ; is marked "? " and skipped (the default).
+    mov     rcx, [DSP + cell]                ; arg1 = c-addr
+    mov     rdx, [DSP]                       ; arg2 = u
+    win64_call(rt_undefined_word)
+    test    rax, rax
+    jz      .undefined_skip
+    mov     TOS, -13
+    call    throw_word
+.undefined_skip:
     mov     TOS, [DSP + 2*cell]
     add     DSP, 3*cell
 

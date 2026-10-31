@@ -1722,6 +1722,7 @@ impl Wf64Session {
                 "rt_slurp_len"   => Some(runtime::rt_slurp_len    as *mut c_void),
                 "rt_slurp_pop"   => Some(runtime::rt_slurp_pop    as *mut c_void),
                 "rt_swi"         => Some(runtime::rt_swi          as *mut c_void),
+                "rt_undefined_word" => Some(runtime::rt_undefined_word as *mut c_void),
                 "rt_swi_number"  => Some(runtime::rt_swi_number   as *mut c_void),
                 "rt_let_compile" => Some(runtime::rt_let_compile as *mut c_void),
                 "rt_code_compile_body" => Some(runtime::rt_code_compile_body as *mut c_void),

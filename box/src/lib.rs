@@ -60,13 +60,20 @@ pub extern "C" fn mf66_box_set_hooks(h: *const Hooks) {
 pub extern "C" fn mf66_box_boot() -> i32 {
     guarded(|| {
         unsafe { SESSION = None };
-        let mut s = match Wf64Session::builtin() {
+        // The library is loaded as WF66 always loads it; then a word not
+        // known is an error, as in MF66.
+        wf64::runtime::set_strict_undefined(false);
+        wf64::runtime::set_muted(true);
+        let booted = Wf64Session::builtin();
+        wf64::runtime::set_muted(false);
+        let mut s = match booted {
             Ok(s) => s,
             Err(e) => {
                 say(&format!("F66: the Forth did not start: {e:#}\n"));
                 return -1;
             }
         };
+        wf64::runtime::set_strict_undefined(true);
         if let Err((line, e)) = s.eval_source(PRELUDE) {
             say(&format!("F66: prelude line {line}: {}\n", message(&e)));
             return -1;
