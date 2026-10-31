@@ -1,0 +1,21 @@
+[package]
+name = "wf66-box"
+version = "0.0.1"
+edition = "2021"
+description = "WF66 for the Intel BOX: the Forth as a static library with MF66's C API (mf66_box.h), linked into /init by A7232ToolChain's modules/forth. See box/README.md."
+
+# Its own workspace: built on its own for x86_64-unknown-linux-musl (box/build.sh).
+[workspace]
+
+[lib]
+name = "wf66_box"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+wf64 = { path = ".." }
+f66-host = { path = "../../MF66-forth-intel/host" }
+anyhow = "1"
+
+[profile.release]
+lto = "thin"

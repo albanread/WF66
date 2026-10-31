@@ -151,7 +151,7 @@ mod sys {
 /// Must run on the scheduler thread before any spawn/switch. Returns 0 (the
 /// operator's aid).
 #[no_mangle]
-pub extern "C" fn rt_agent_init() -> u64 {
+pub extern "win64" fn rt_agent_init() -> u64 {
     // Reuse the operator fiber if this thread was already converted (a prior
     // init); ConvertThreadToFiber fails on an already-fiber thread.
     let existing = OPERATOR.with(|c| c.get());
@@ -190,14 +190,14 @@ pub extern "C" fn rt_agent_init() -> u64 {
 
 /// `(spawn) ( entry-xt -- aid )` — create an agent fiber that runs `entry_xt`.
 #[no_mangle]
-pub extern "C" fn rt_agent_spawn(entry_xt: u64) -> u64 {
+pub extern "win64" fn rt_agent_spawn(entry_xt: u64) -> u64 {
     rt_agent_spawn_with_recv(entry_xt, 0)
 }
 
 /// `(spawn-recv) ( recv entry-xt -- aid )` — like `(spawn)` but the agent carries
 /// a receiver object `recv` (read back via `(recv)`), so a method can be its body.
 #[no_mangle]
-pub extern "C" fn rt_agent_spawn_with_recv(entry_xt: u64, recv: u64) -> u64 {
+pub extern "win64" fn rt_agent_spawn_with_recv(entry_xt: u64, recv: u64) -> u64 {
     let up = USER_BASE.load(Ordering::SeqCst);
     let tramp = TRAMPOLINE.load(Ordering::SeqCst);
     let mut ds = vec![0u64; DS_CELLS];
@@ -238,7 +238,7 @@ pub extern "C" fn rt_agent_spawn_with_recv(entry_xt: u64, recv: u64) -> u64 {
 /// switch (TOS) is done by the kernel `(switch-to)` primitive; fibers preserve
 /// RBP/R15/XMM15 (non-volatile) automatically.
 #[no_mangle]
-pub extern "C" fn rt_agent_switch(target: u64) -> u64 {
+pub extern "win64" fn rt_agent_switch(target: u64) -> u64 {
     let t = target as usize;
     let fiber = AGENTS.with(|a| {
         let a = a.borrow();
@@ -280,7 +280,7 @@ pub extern "C" fn rt_agent_switch(target: u64) -> u64 {
 
 /// `(ready-push) ( aid -- )` — mark an agent runnable (dedup; no-op if queued).
 #[no_mangle]
-pub extern "C" fn rt_sched_ready_push(aid: u64) -> u64 {
+pub extern "win64" fn rt_sched_ready_push(aid: u64) -> u64 {
     let t = aid as usize;
     let push = AGENTS.with(|a| {
         let mut a = a.borrow_mut();
@@ -300,7 +300,7 @@ pub extern "C" fn rt_sched_ready_push(aid: u64) -> u64 {
 
 /// `(ready-pop) ( -- aid )` — next runnable agent, or -1 if none.
 #[no_mangle]
-pub extern "C" fn rt_sched_ready_pop() -> u64 {
+pub extern "win64" fn rt_sched_ready_pop() -> u64 {
     let id = READY.with(|r| r.borrow_mut().pop_front());
     match id {
         Some(t) => {
@@ -317,7 +317,7 @@ pub extern "C" fn rt_sched_ready_pop() -> u64 {
 
 /// `(ready-count) ( -- n )` — number of runnable agents queued right now.
 #[no_mangle]
-pub extern "C" fn rt_sched_ready_len() -> u64 {
+pub extern "win64" fn rt_sched_ready_len() -> u64 {
     READY.with(|r| r.borrow().len() as u64)
 }
 
@@ -348,7 +348,7 @@ pub fn run_slice() {
 /// `(send) ( msg aid -- )` — enqueue a message to an agent's mailbox and make it
 /// runnable. (Win64 args: rcx=msg, rdx=aid — see the kernel primitive.)
 #[no_mangle]
-pub extern "C" fn rt_mailbox_send(msg: u64, aid: u64) -> u64 {
+pub extern "win64" fn rt_mailbox_send(msg: u64, aid: u64) -> u64 {
     let t = aid as usize;
     AGENTS.with(|a| {
         if let Some(s) = a.borrow_mut().get_mut(t) {
@@ -361,7 +361,7 @@ pub extern "C" fn rt_mailbox_send(msg: u64, aid: u64) -> u64 {
 
 /// `(mailbox-len) ( -- n )` — number of pending messages for the running agent.
 #[no_mangle]
-pub extern "C" fn rt_mailbox_len() -> u64 {
+pub extern "win64" fn rt_mailbox_len() -> u64 {
     let cur = CURRENT.with(|c| c.get());
     AGENTS.with(|a| a.borrow().get(cur).map_or(0, |s| s.mailbox.len() as u64))
 }
@@ -369,7 +369,7 @@ pub extern "C" fn rt_mailbox_len() -> u64 {
 /// `(mailbox-pop) ( -- msg )` — dequeue the running agent's next message, or -1
 /// if the mailbox is empty (callers normally check `(mailbox-len)` first).
 #[no_mangle]
-pub extern "C" fn rt_mailbox_pop() -> u64 {
+pub extern "win64" fn rt_mailbox_pop() -> u64 {
     let cur = CURRENT.with(|c| c.get());
     AGENTS.with(|a| {
         a.borrow_mut()
@@ -382,7 +382,7 @@ pub extern "C" fn rt_mailbox_pop() -> u64 {
 /// Called by the trampoline when an agent's entry word returns: mark it done and
 /// switch back to the operator. Never returns to the agent.
 #[no_mangle]
-pub extern "C" fn rt_agent_done() -> u64 {
+pub extern "win64" fn rt_agent_done() -> u64 {
     let cur = CURRENT.with(|c| c.get());
     // Mark done and restore the OPERATOR's per-agent cells (FSP/HANDLER/SELF)
     // before switching to it — unlike rt_agent_switch, this path doesn't go through
@@ -408,7 +408,7 @@ pub extern "C" fn rt_agent_done() -> u64 {
 
 /// `(agent-done?) ( aid -- flag )` — -1 if the agent has finished (or is unknown).
 #[no_mangle]
-pub extern "C" fn rt_agent_is_done(aid: u64) -> u64 {
+pub extern "win64" fn rt_agent_is_done(aid: u64) -> u64 {
     AGENTS.with(|a| {
         let a = a.borrow();
         match a.get(aid as usize) {
@@ -420,7 +420,7 @@ pub extern "C" fn rt_agent_is_done(aid: u64) -> u64 {
 
 /// `(self) ( -- aid )` — the running agent's id.
 #[no_mangle]
-pub extern "C" fn rt_agent_self() -> u64 {
+pub extern "win64" fn rt_agent_self() -> u64 {
     CURRENT.with(|c| c.get()) as u64
 }
 
@@ -428,7 +428,7 @@ pub extern "C" fn rt_agent_self() -> u64 {
 /// `(spawn-recv)`), or 0 if none. The `View` controller entry word sends `run`
 /// to it. See lib/view.f.
 #[no_mangle]
-pub extern "C" fn rt_agent_recv() -> u64 {
+pub extern "win64" fn rt_agent_recv() -> u64 {
     let cur = CURRENT.with(|c| c.get());
     AGENTS.with(|a| a.borrow().get(cur).map_or(0, |s| s.recv))
 }
@@ -441,7 +441,7 @@ pub extern "C" fn rt_agent_recv() -> u64 {
 /// `(set-pane) ( child_id -- )` — bind the RUNNING agent to a pane `child_id`.
 /// A negative value unbinds (output falls back to the shared session I/O).
 #[no_mangle]
-pub extern "C" fn rt_agent_set_pane(child_id: u64) -> u64 {
+pub extern "win64" fn rt_agent_set_pane(child_id: u64) -> u64 {
     let cur = CURRENT.with(|c| c.get());
     AGENTS.with(|a| {
         if let Some(s) = a.borrow_mut().get_mut(cur) {
@@ -565,7 +565,7 @@ pub fn post_to_pane(child_id: i64, msg: u64) -> bool {
 /// `(req-bind) ( request_id -- )` — record that the RUNNING agent is awaiting the
 /// async reply for `request_id`. Pair with `receive` (see `await-reply`).
 #[no_mangle]
-pub extern "C" fn rt_agent_req_bind(request_id: u64) -> u64 {
+pub extern "win64" fn rt_agent_req_bind(request_id: u64) -> u64 {
     let cur = CURRENT.with(|c| c.get());
     REQ_AGENTS.with(|m| m.borrow_mut().insert(request_id as u32, cur));
     0

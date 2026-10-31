@@ -174,6 +174,28 @@ proc(rt_slurp_file_word)
     next()
 endp()
 
+; (swi)  ( regs n -- err )
+;     The BOX: call RISC OS SWI n with R0..R9 from regs[0..9], which get the
+;     registers after; regs[10] gets the flags (N Z C V as bits 3..0). The
+;     result is 0, or the error block's address. Elsewhere it fails.
+proc(paren_swi_word)
+    mov     rcx, TOS                 ; arg1 = SWI number
+    mov     rdx, [DSP]               ; arg2 = regs
+    win64_call(rt_swi)
+    stk(2, 1)
+    next()
+endp()
+
+; (swi#)  ( c-addr u -- n )
+;     The BOX: a SWI's number from its name, or -1.
+proc(paren_swi_number_word)
+    mov     rcx, [DSP]               ; arg1 = name addr
+    mov     rdx, TOS                 ; arg2 = name len
+    win64_call(rt_swi_number)
+    stk(2, 1)
+    next()
+endp()
+
 ; rt-slurp-len  ( -- u )
 ;     Return the byte length of the top slurped file, or 0 if empty.
 proc(rt_slurp_len_word)

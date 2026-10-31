@@ -62,6 +62,8 @@
 @extern rt_slurp_file(2)        ; read file at (addr,len) into Rust Vec, return content ptr or 0
 @extern rt_slurp_len(0)         ; return byte length of top slurped file
 @extern rt_slurp_pop(0)         ; pop and free the top slurped file
+@extern rt_swi(2)               ; RISC OS SWI (number, regs block): 0 or error block
+@extern rt_swi_number(2)        ; SWI number from its name (addr,len), or -1
 @extern rt_let_compile(1)       ; compile a LET form (arg = UP)
 @extern rt_code_compile_body(1) ; compile a CODE: body, returns fn_addr (arg = UP)
 @extern rt_vec_alloc_floats(3)  ; (UP, n_cells, slot_addr) -> err — alloc + store
