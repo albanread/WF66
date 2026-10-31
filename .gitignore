@@ -15,3 +15,4 @@ Thumbs.db
 
 # opt-bench dynamic (advisory) timing companions — never committed
 bench/baseline/*.timing.json
+/box/target

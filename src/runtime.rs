@@ -91,6 +91,12 @@ pub fn with_io<R>(io: Io, f: impl FnOnce() -> R) -> (R, Io) {
     (result, io_after)
 }
 
+/// Drop whatever I/O a run left bound: after a long jump out of Forth code
+/// (a fault, Escape) its `with_io` never put the previous one back.
+pub fn forget_io() {
+    CURRENT_IO.with(|cell| cell.replace(None));
+}
+
 /// Quick accessor used by runtime functions: panic if there's no
 /// session bound (that would indicate a logic bug in the harness).
 fn with_current_io<R>(f: impl FnOnce(&mut Io) -> R) -> R {
@@ -110,7 +116,7 @@ fn with_current_io<R>(f: impl FnOnce(&mut Io) -> R) -> R {
 /// layout.  Falls back to decimal (base 10) if the kernel passes
 /// an out-of-range value (< 2 or > 36).
 #[no_mangle]
-pub extern "C" fn rt_print_int(n: u64, base: u64) -> u64 {
+pub extern "win64" fn rt_print_int(n: u64, base: u64) -> u64 {
     let s = n as i64;
     let b = if (2..=36).contains(&base) { base as u32 } else { 10 };
     let mut buf = String::with_capacity(24);
@@ -158,7 +164,7 @@ pub extern "C" fn rt_print_int(n: u64, base: u64) -> u64 {
 /// reconstruct the logical stack shape without forcing a restart or a
 /// spill/reload cycle through forth_main.
 #[no_mangle]
-pub extern "C" fn rt_dot_s(tos: u64, dsp: u64, sp0: u64, rsp: u64) -> u64 {
+pub extern "win64" fn rt_dot_s(tos: u64, dsp: u64, sp0: u64, rsp: u64) -> u64 {
     let depth = if dsp > sp0 {
         0usize
     } else {
@@ -195,7 +201,7 @@ pub extern "C" fn rt_dot_s(tos: u64, dsp: u64, sp0: u64, rsp: u64) -> u64 {
 /// # Safety
 /// All pointers come from the live JIT session arena.
 #[no_mangle]
-pub extern "C" fn rt_forth_brk(tos: u64, dsp: u64, sp0: u64, rsp: u64, up: u64) -> u64 {
+pub extern "win64" fn rt_forth_brk(tos: u64, dsp: u64, sp0: u64, rsp: u64, up: u64) -> u64 {
     let mut out = String::with_capacity(512);
 
     out.push_str("\n=== Forth Breakpoint ==================================================\n");
@@ -268,7 +274,7 @@ pub extern "C" fn rt_forth_brk(tos: u64, dsp: u64, sp0: u64, rsp: u64, up: u64) 
 /// # Safety
 /// `nt` points into the live JIT dictionary arena.
 #[no_mangle]
-pub extern "C" fn rt_forth_trace(nt: u64, tos: u64, dsp: u64, sp0: u64) -> u64 {
+pub extern "win64" fn rt_forth_trace(nt: u64, tos: u64, dsp: u64, sp0: u64) -> u64 {
     let name = unsafe {
         let len = *(nt as *const u8) as usize;
         let bytes = std::slice::from_raw_parts((nt + 1) as *const u8, len);
@@ -299,7 +305,7 @@ pub extern "C" fn rt_forth_trace(nt: u64, tos: u64, dsp: u64, sp0: u64) -> u64 {
 
 /// Write one byte to current output.
 #[no_mangle]
-pub extern "C" fn rt_emit(ch: u64) -> u64 {
+pub extern "win64" fn rt_emit(ch: u64) -> u64 {
     let byte = ch as u8;
     write_bytes(&[byte]);
     0
@@ -310,7 +316,7 @@ pub extern "C" fn rt_emit(ch: u64) -> u64 {
 /// # Safety
 /// The JITed `type` primitive guarantees `[addr, addr+len)` is readable.
 #[no_mangle]
-pub extern "C" fn rt_type(addr: u64, len: u64) -> u64 {
+pub extern "win64" fn rt_type(addr: u64, len: u64) -> u64 {
     if len == 0 {
         return 0;
     }
@@ -326,7 +332,7 @@ pub extern "C" fn rt_type(addr: u64, len: u64) -> u64 {
 ///
 /// Kept exported because the win32 bindings list it; harmless no-op now.
 #[no_mangle]
-pub extern "C" fn rt_bye(_code: u64) -> u64 {
+pub extern "win64" fn rt_bye(_code: u64) -> u64 {
     0
 }
 
@@ -349,7 +355,7 @@ pub extern "C" fn rt_bye(_code: u64) -> u64 {
 /// # Safety
 /// The kernel's `accept` guarantees `[buf, buf+cap)` is writable.
 #[no_mangle]
-pub extern "C" fn rt_read_line(buf: u64, cap: u64) -> u64 {
+pub extern "win64" fn rt_read_line(buf: u64, cap: u64) -> u64 {
     const EOF: u64 = u64::MAX;
     let cap = cap as usize;
     if cap == 0 {
@@ -360,6 +366,7 @@ pub extern "C" fn rt_read_line(buf: u64, cap: u64) -> u64 {
     with_current_io(|io| match io {
         Io::Buffered { input, in_cursor, .. } => {
             if *in_cursor >= input.len() {
+                INPUT_ENDED.store(true, std::sync::atomic::Ordering::Relaxed);
                 return EOF;
             }
             // Find next LF (or end-of-input).
@@ -411,7 +418,10 @@ pub extern "C" fn rt_read_line(buf: u64, cap: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_read_key() -> u64 {
+pub extern "win64" fn rt_read_key() -> u64 {
+    if let Some(key) = f66_host::hooks().and_then(|h| h.key) {
+        return key() as u64;
+    }
     with_current_io(|io| match io {
         Io::Buffered { input, in_cursor, pending_key, .. } => {
             if let Some(byte) = pending_key.take() {
@@ -442,7 +452,10 @@ pub extern "C" fn rt_read_key() -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_key_q() -> u64 {
+pub extern "win64" fn rt_key_q() -> u64 {
+    if let Some(ready) = f66_host::hooks().and_then(|h| h.key_ready) {
+        return if ready() != 0 { u64::MAX } else { 0 };
+    }
     with_current_io(|io| match io {
         Io::Buffered { input, in_cursor, pending_key, .. } => {
             if pending_key.is_some() {
@@ -478,7 +491,7 @@ pub extern "C" fn rt_key_q() -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_to_float(addr: u64, len: u64, out_bits: u64) -> u64 {
+pub extern "win64" fn rt_to_float(addr: u64, len: u64, out_bits: u64) -> u64 {
     if len == 0 || out_bits == 0 {
         return 0;
     }
@@ -515,13 +528,17 @@ thread_local! {
 /// `rt_slurp_pop` is called). Returns 0 on any error (file not found,
 /// UTF-8 etc.).
 #[no_mangle]
-pub extern "C" fn rt_slurp_file(path_addr: u64, path_len: u64) -> u64 {
+pub extern "win64" fn rt_slurp_file(path_addr: u64, path_len: u64) -> u64 {
     let path_bytes =
         unsafe { std::slice::from_raw_parts(path_addr as *const u8, path_len as usize) };
     let Ok(path_str) = std::str::from_utf8(path_bytes) else {
         return 0;
     };
-    match std::fs::read(path_str.trim()) {
+    let read = match f66_host::hooks() {
+        Some(h) if h.file_open.is_some() => host_read_file(h, path_str.trim().as_bytes()),
+        _ => std::fs::read(path_str.trim()).ok(),
+    };
+    match read.ok_or(()) {
         Ok(bytes) => SLURP_STACK.with(|s| {
             let mut stack = s.borrow_mut();
             stack.push(bytes);
@@ -531,9 +548,96 @@ pub extern "C" fn rt_slurp_file(path_addr: u64, path_len: u64) -> u64 {
     }
 }
 
+/// A whole file read through the host's file hooks (the BOX: RISC OS names).
+fn host_read_file(h: &f66_host::Hooks, name: &[u8]) -> Option<Vec<u8>> {
+    let (open, read, close) = (h.file_open?, h.file_read?, h.file_close?);
+    let fh = open(name.as_ptr(), name.len(), 1);
+    if fh == 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = read(fh, buf.as_mut_ptr(), buf.len());
+        if n <= 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    close(fh);
+    Some(out)
+}
+
+/// `(swi)`: a RISC OS SWI through the host. regs[0..9] are R0..R9 in and
+/// out, regs[10] the flags after (N Z C V as bits 3..0). 0, or the error
+/// block's address; with no host, an error block of our own.
+#[no_mangle]
+pub extern "win64" fn rt_swi(n: u64, regs: u64) -> u64 {
+    match f66_host::hooks().and_then(|h| h.swi) {
+        Some(swi) => {
+            let r = regs as *mut u64;
+            swi(n, r, unsafe { r.add(10) })
+        }
+        None => {
+            static NO_SWIS: &[u8] = b"\0\0\0\0SWIs need the BOX\0";
+            NO_SWIS.as_ptr() as u64
+        }
+    }
+}
+
+static INPUT_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// quit's buffered input ran out (it then sets the bye flag itself, as at
+/// the end of a file): cleared by [`clear_input_ended`] before each run.
+pub fn input_ended() -> bool {
+    INPUT_ENDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn clear_input_ended() {
+    INPUT_ENDED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+static MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Drop what the host writer would be given (the BOX, while the library
+/// loads at boot: WF66's core.f marks a few Windows words it does not find).
+pub fn set_muted(on: bool) {
+    MUTED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+static STRICT_UNDEFINED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make an undefined word an error (the BOX, once its session has booted).
+pub fn set_strict_undefined(on: bool) {
+    STRICT_UNDEFINED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The outer interpreter met a word it does not know. When strict (the
+/// BOX) that is an error, as in MF66: the name is printed and the kernel
+/// THROWs -13. Otherwise 0: the kernel prints "? " and goes on.
+#[no_mangle]
+pub extern "win64" fn rt_undefined_word(addr: u64, len: u64) -> u64 {
+    if !STRICT_UNDEFINED.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    let name = unsafe { std::slice::from_raw_parts(addr as *const u8, len as usize) };
+    write_bytes(name);
+    write_bytes(b" ");
+    1
+}
+
+/// `(swi#)`: a SWI's number from its name, or -1.
+#[no_mangle]
+pub extern "win64" fn rt_swi_number(addr: u64, len: u64) -> u64 {
+    match f66_host::hooks().and_then(|h| h.swi_number) {
+        Some(f) => f(addr as *const u8, len as usize) as u64,
+        None => u64::MAX,
+    }
+}
+
 /// Return the byte length of the top slurped file (0 if stack is empty).
 #[no_mangle]
-pub extern "C" fn rt_slurp_len() -> u64 {
+pub extern "win64" fn rt_slurp_len() -> u64 {
     SLURP_STACK.with(|s| {
         s.borrow().last().map(|v| v.len() as u64).unwrap_or(0)
     })
@@ -541,7 +645,7 @@ pub extern "C" fn rt_slurp_len() -> u64 {
 
 /// Pop (and free) the top slurped file from the stack.
 #[no_mangle]
-pub extern "C" fn rt_slurp_pop() -> u64 {
+pub extern "win64" fn rt_slurp_pop() -> u64 {
     SLURP_STACK.with(|s| {
         s.borrow_mut().pop();
         0
@@ -579,7 +683,7 @@ const PAGE_SIZE_CELLS: u64 = 8192;
 /// Returns 0 on success, u64::MAX on allocation failure (heap full
 /// even after compaction, or `n_cells > u32::MAX`).
 #[no_mangle]
-pub extern "C" fn rt_vec_alloc_floats(up: u64, n_cells: u64, slot_addr: u64) -> u64 {
+pub extern "win64" fn rt_vec_alloc_floats(up: u64, n_cells: u64, slot_addr: u64) -> u64 {
     if n_cells > u32::MAX as u64 {
         eprintln!("vec-alloc-floats!: requested length {n_cells} exceeds u32::MAX");
         return u64::MAX;
@@ -605,7 +709,7 @@ pub extern "C" fn rt_vec_alloc_floats(up: u64, n_cells: u64, slot_addr: u64) -> 
 /// the tagged pointer at `*slot_addr`.  Fragmentation-retry path
 /// mirrors `rt_vec_alloc_floats`.
 #[no_mangle]
-pub extern "C" fn rt_vec_alloc_refs(up: u64, n_cells: u64, slot_addr: u64) -> u64 {
+pub extern "win64" fn rt_vec_alloc_refs(up: u64, n_cells: u64, slot_addr: u64) -> u64 {
     if n_cells > u32::MAX as u64 {
         eprintln!("vec-alloc-refs!: requested length {n_cells} exceeds u32::MAX");
         return u64::MAX;
@@ -701,7 +805,7 @@ unsafe fn emit_at_here(up: u64, bytes: &[u8]) {
 /// area (PIN_PLAN_COUNT + entries). Logs the plan when PIN_DEBUG is set.
 /// Arg: UP. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_pin_analyze(up: u64) -> u64 {
+pub extern "win64" fn rt_pin_analyze(up: u64) -> u64 {
     let recs = read_pin_records(up);
     let vocab = pin_vocab(up);
     let plan = crate::pin::analyze(&recs, &vocab);
@@ -735,7 +839,7 @@ pub extern "C" fn rt_pin_analyze(up: u64) -> u64 {
 /// an ACCESS sentinel (payload = kind<<8 | reg) followed by a SKIP sentinel,
 /// so pin_replay emits register ops instead of the normal compile. Arg: UP.
 #[no_mangle]
-pub extern "C" fn rt_pin_rewrite(up: u64) -> u64 {
+pub extern "win64" fn rt_pin_rewrite(up: u64) -> u64 {
     let vocab = pin_vocab(up);
     let count = unsafe { *((up + crate::USER_PIN_PLAN_COUNT) as *const u64) } as usize;
     if count == 0 {
@@ -792,7 +896,7 @@ pub extern "C" fn rt_pin_rewrite(up: u64) -> u64 {
 /// Emit the prologue loads (for read/read-write pins) at HERE. Returns the
 /// number of bytes emitted (so the kernel can bump the loop back-target).
 #[no_mangle]
-pub extern "C" fn rt_pin_emit_prologue(up: u64) -> u64 {
+pub extern "win64" fn rt_pin_emit_prologue(up: u64) -> u64 {
     let count = unsafe { *((up + crate::USER_PIN_PLAN_COUNT) as *const u64) } as usize;
     let here = unsafe { *((up + crate::USER_HERE_VAR) as *const u64) };
     let mut bytes = Vec::new();
@@ -818,7 +922,7 @@ pub extern "C" fn rt_pin_emit_prologue(up: u64) -> u64 {
 
 /// Emit the write-backs (for write/read-write pins) at HERE. Arg: UP.
 #[no_mangle]
-pub extern "C" fn rt_pin_emit_writeback(up: u64) -> u64 {
+pub extern "win64" fn rt_pin_emit_writeback(up: u64) -> u64 {
     let count = unsafe { *((up + crate::USER_PIN_PLAN_COUNT) as *const u64) } as usize;
     let here = unsafe { *((up + crate::USER_HERE_VAR) as *const u64) };
     let mut bytes = Vec::new();
@@ -844,7 +948,7 @@ pub extern "C" fn rt_pin_emit_writeback(up: u64) -> u64 {
 
 /// Emit one pinned access at HERE. `encoded` = kind<<8 | reg. Arg: UP, encoded.
 #[no_mangle]
-pub extern "C" fn rt_pin_emit_access(up: u64, encoded: u64) -> u64 {
+pub extern "win64" fn rt_pin_emit_access(up: u64, encoded: u64) -> u64 {
     let kind = (encoded >> 8) as u8;
     let reg = (encoded & 0xff) as u8;
     let mut bytes = Vec::new();
@@ -918,7 +1022,7 @@ pub fn wf66_clear_inline_cache() {
 
 /// Start capturing a new definition (from `:`). Arg: UP. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_begin(_up: u64) -> u64 {
+pub extern "win64" fn rt_ir_begin(_up: u64) -> u64 {
     if wf66_dbg() {
         eprintln!("[wf66] begin");
     }
@@ -928,7 +1032,7 @@ pub extern "C" fn rt_ir_begin(_up: u64) -> u64 {
 
 /// Append a literal push. Arg: UP, value. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_lit(_up: u64, value: u64) -> u64 {
+pub extern "win64" fn rt_ir_lit(_up: u64, value: u64) -> u64 {
     WF66_IR.with(|b| b.borrow_mut().lit(value as i64));
     0
 }
@@ -1074,7 +1178,7 @@ fn wf66_litop_of(up: u64, xt: u64) -> Option<(i64, crate::wf66::Fop)> {
 /// anything else becomes a `Word` token, which taints the span as
 /// non-deferrable so the eager body is kept. Arg: UP, xt. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_word(up: u64, xt: u64) -> u64 {
+pub extern "win64" fn rt_ir_word(up: u64, xt: u64) -> u64 {
     // `;` reaches this hook as an immediate word during its own dispatch, just
     // before its body runs the finalizer. It is the terminator, not body content
     // — skip it so it does not taint the span.
@@ -1226,7 +1330,7 @@ fn wf66_create_var_pfa(xt: u64) -> Option<u64> {
 /// Mark the span non-deferrable: an immediate word ran during compile and its
 /// emission is opaque to the IR. Arg: UP. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_taint(_up: u64) -> u64 {
+pub extern "win64" fn rt_ir_taint(_up: u64) -> u64 {
     WF66_IR.with(|b| b.borrow_mut().opaque());
     0
 }
@@ -1236,7 +1340,7 @@ pub extern "C" fn rt_ir_taint(_up: u64) -> u64 {
 /// bypass the convergence point (they're emitted before find-name), so the
 /// kernel calls this directly so WF66 sees them.
 #[no_mangle]
-pub extern "C" fn rt_ir_local_fetch(_up: u64, offset: u64) -> u64 {
+pub extern "win64" fn rt_ir_local_fetch(_up: u64, offset: u64) -> u64 {
     WF66_IR.with(|b| b.borrow_mut().local_fetch(offset as i32));
     0
 }
@@ -1245,7 +1349,7 @@ pub extern "C" fn rt_ir_local_fetch(_up: u64, offset: u64) -> u64 {
 /// data TOS -> `[r15+offset]`. Args: UP, byte offset. Returns 0. (Same bypass
 /// reason as the fetch hook.)
 #[no_mangle]
-pub extern "C" fn rt_ir_local_store(_up: u64, offset: u64) -> u64 {
+pub extern "win64" fn rt_ir_local_store(_up: u64, offset: u64) -> u64 {
     WF66_IR.with(|b| b.borrow_mut().local_store(offset as i32));
     0
 }
@@ -1253,7 +1357,7 @@ pub extern "C" fn rt_ir_local_store(_up: u64, offset: u64) -> u64 {
 /// Record a float-local fetch (`check_local_emit_word`'s FP branch): `[r15+off]`
 /// -> FP stack. Args: UP, byte offset. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_local_ffetch(_up: u64, offset: u64) -> u64 {
+pub extern "win64" fn rt_ir_local_ffetch(_up: u64, offset: u64) -> u64 {
     WF66_IR.with(|b| b.borrow_mut().local_ffetch(offset as i32));
     0
 }
@@ -1261,7 +1365,7 @@ pub extern "C" fn rt_ir_local_ffetch(_up: u64, offset: u64) -> u64 {
 /// Record a float-local store (`to floatlocal`, `check_local_store_word`'s FP
 /// branch): FP stack -> `[r15+off]`. Args: UP, byte offset. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_local_fstore(_up: u64, offset: u64) -> u64 {
+pub extern "win64" fn rt_ir_local_fstore(_up: u64, offset: u64) -> u64 {
     WF66_IR.with(|b| b.borrow_mut().local_fstore(offset as i32));
     0
 }
@@ -1269,7 +1373,7 @@ pub extern "C" fn rt_ir_local_fstore(_up: u64, offset: u64) -> u64 {
 /// Record a floating-point literal push. Arg: UP, the raw 64-bit pattern (the
 /// FTOS bits at compile time). Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_flit(_up: u64, bits: u64) -> u64 {
+pub extern "win64" fn rt_ir_flit(_up: u64, bits: u64) -> u64 {
     WF66_IR.with(|b| b.borrow_mut().flit(bits));
     0
 }
@@ -1283,7 +1387,7 @@ pub extern "C" fn rt_ir_flit(_up: u64, bits: u64) -> u64 {
 /// top of the data stack lands in the highest init slot), matching the fetches.
 /// Args: UP, n_total, n_init. Returns 0.
 #[no_mangle]
-pub extern "C" fn rt_ir_open_locals(_up: u64, n_total: u64, n_init: u64) -> u64 {
+pub extern "win64" fn rt_ir_open_locals(_up: u64, n_total: u64, n_init: u64) -> u64 {
     WF66_IR.with(|c| {
         let mut b = c.borrow_mut();
         b.open_locals(n_total as u32);
@@ -1302,7 +1406,7 @@ pub extern "C" fn rt_ir_open_locals(_up: u64, n_total: u64, n_init: u64) -> u64 
 /// return 0 and leave the eager body intact. Always clears user_WF66_REC.
 /// Arg: UP.
 #[no_mangle]
-pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
+pub extern "win64" fn rt_ir_finalize(up: u64) -> u64 {
     unsafe { *((up + crate::USER_WF66_REC) as *mut u64) = 0 };
     // If the def declared locals, append the paired frame teardown. The kernel's
     // `;` would emit `add r15, n*8`, but WF66's rewrite replaces that finish; the
@@ -1360,7 +1464,7 @@ pub extern "C" fn rt_ir_finalize(up: u64) -> u64 {
 /// region as roots (V2s: compile-time string literals live in the
 /// second region).  Caller passes `up` (the UP register value).
 #[no_mangle]
-pub extern "C" fn rt_gc_collect(up: u64) -> u64 {
+pub extern "win64" fn rt_gc_collect(up: u64) -> u64 {
     let regions = gc_root_regions(up);
     for (base, next) in regions {
         if next < base {
@@ -1375,7 +1479,7 @@ pub extern "C" fn rt_gc_collect(up: u64) -> u64 {
 
 /// Run a minor GC.  Same root set as `rt_gc_collect`.
 #[no_mangle]
-pub extern "C" fn rt_gc_collect_minor(up: u64) -> u64 {
+pub extern "win64" fn rt_gc_collect_minor(up: u64) -> u64 {
     let regions = gc_root_regions(up);
     for (base, next) in regions {
         if next < base {
@@ -1393,7 +1497,7 @@ pub extern "C" fn rt_gc_collect_minor(up: u64) -> u64 {
 ///
 /// Returns 0 when no collection is needed.  Never errors.
 #[no_mangle]
-pub extern "C" fn rt_gc_should_collect() -> u64 {
+pub extern "win64" fn rt_gc_should_collect() -> u64 {
     if gc::should_collect() { 1 } else { 0 }
 }
 
@@ -1407,7 +1511,7 @@ pub extern "C" fn rt_gc_should_collect() -> u64 {
 /// Returns 0 always; the auto-cycle's outcome is observable
 /// indirectly via `gc-cycle`.
 #[no_mangle]
-pub extern "C" fn rt_gc_auto_step(up: u64) -> u64 {
+pub extern "win64" fn rt_gc_auto_step(up: u64) -> u64 {
     if !gc::should_collect() {
         return 0;
     }
@@ -1423,7 +1527,7 @@ pub extern "C" fn rt_gc_auto_step(up: u64) -> u64 {
 /// multi-page request even when the total free count is enough).
 /// Per docs/forth_gc_needs.md item #9.
 #[no_mangle]
-pub extern "C" fn rt_gc_collect_full(up: u64) -> u64 {
+pub extern "win64" fn rt_gc_collect_full(up: u64) -> u64 {
     let regions = gc_root_regions(up);
     for (base, next) in regions {
         if next < base {
@@ -1439,7 +1543,7 @@ pub extern "C" fn rt_gc_collect_full(up: u64) -> u64 {
 /// as the Forth word `gc-cycle ( -- n )`.  Reset to 0 by session
 /// reset between harness tests.
 #[no_mangle]
-pub extern "C" fn rt_gc_cycle_count() -> u64 {
+pub extern "win64" fn rt_gc_cycle_count() -> u64 {
     gc::gc_cycle_count()
 }
 
@@ -1466,7 +1570,7 @@ pub extern "C" fn rt_gc_cycle_count() -> u64 {
 /// guarantees this — it gets the (c-addr, u) pair directly from
 /// the Forth data stack.
 #[no_mangle]
-pub extern "C" fn rt_string_from_bytes(up: u64, src_addr: u64, len: u64) -> u64 {
+pub extern "win64" fn rt_string_from_bytes(up: u64, src_addr: u64, len: u64) -> u64 {
     if len > u32::MAX as u64 {
         eprintln!(">$: requested length {len} exceeds u32::MAX");
         return u64::MAX;
@@ -1533,7 +1637,7 @@ unsafe fn builder_set_length(base: u64, new_length: u32) {
 /// bytes.  Returns the tagged pointer, or `u64::MAX` on failure.
 /// Auto-trigger + fragmentation-retry mirror the other allocators.
 #[no_mangle]
-pub extern "C" fn rt_sb_new(up: u64, capacity_bytes: u64) -> u64 {
+pub extern "win64" fn rt_sb_new(up: u64, capacity_bytes: u64) -> u64 {
     if capacity_bytes > u32::MAX as u64 {
         eprintln!("sb-new: capacity {capacity_bytes} exceeds u32::MAX");
         return u64::MAX;
@@ -1571,7 +1675,7 @@ pub extern "C" fn rt_sb_new(up: u64, capacity_bytes: u64) -> u64 {
 /// append would overflow capacity (used as the -2062 throw signal
 /// in the kernel-side wrapper).
 #[no_mangle]
-pub extern "C" fn rt_sb_append_bytes(
+pub extern "win64" fn rt_sb_append_bytes(
     builder_tagged: u64,
     src_addr: u64,
     len: u64,
@@ -1599,7 +1703,7 @@ pub extern "C" fn rt_sb_append_bytes(
 /// 0 on success, `u64::MAX` on capacity overflow or an invalid
 /// codepoint (surrogate or > U+10FFFF).
 #[no_mangle]
-pub extern "C" fn rt_sb_append_codepoint(
+pub extern "win64" fn rt_sb_append_codepoint(
     builder_tagged: u64,
     codepoint: u64,
 ) -> u64 {
@@ -1622,7 +1726,7 @@ pub extern "C" fn rt_sb_append_codepoint(
 /// Append the decimal representation of a signed integer `n` to
 /// the builder.  Returns 0 on success, `u64::MAX` on overflow.
 #[no_mangle]
-pub extern "C" fn rt_sb_append_int(builder_tagged: u64, n: u64) -> u64 {
+pub extern "win64" fn rt_sb_append_int(builder_tagged: u64, n: u64) -> u64 {
     let s = (n as i64).to_string();
     rt_sb_append_bytes(
         builder_tagged,
@@ -1637,7 +1741,7 @@ pub extern "C" fn rt_sb_append_int(builder_tagged: u64, n: u64) -> u64 {
 /// V2s design — the builder remains usable.  Returns the tagged
 /// String pointer, or `u64::MAX` on allocation failure.
 #[no_mangle]
-pub extern "C" fn rt_sb_to_string(up: u64, builder_tagged: u64) -> u64 {
+pub extern "win64" fn rt_sb_to_string(up: u64, builder_tagged: u64) -> u64 {
     let base = builder_tagged & !7;
     let (length, _capacity) = unsafe { builder_header(base) };
     let payload_addr = base + 16;
@@ -1671,7 +1775,7 @@ unsafe fn string_payload(tagged: u64) -> (*const u8, usize) {
 /// halves into the payload without a phantom memcpy from a synthetic
 /// "merged" buffer.  Fragmentation-retry mirrors the other paths.
 #[no_mangle]
-pub extern "C" fn rt_string_concat(up: u64, tagged_a: u64, tagged_b: u64) -> u64 {
+pub extern "win64" fn rt_string_concat(up: u64, tagged_a: u64, tagged_b: u64) -> u64 {
     let (a_ptr, a_len) = unsafe { string_payload(tagged_a) };
     let (b_ptr, b_len) = unsafe { string_payload(tagged_b) };
     let total = a_len + b_len;
@@ -1716,7 +1820,7 @@ pub extern "C" fn rt_string_concat(up: u64, tagged_a: u64, tagged_b: u64) -> u64
 /// Caller guarantees `start <= end <= len`.  Returns tagged String
 /// or `u64::MAX` on alloc failure.
 #[no_mangle]
-pub extern "C" fn rt_string_slice(
+pub extern "win64" fn rt_string_slice(
     up: u64,
     tagged: u64,
     start: u64,
@@ -1738,7 +1842,7 @@ pub extern "C" fn rt_string_slice(
 /// `u64::MAX` (= -1 in Forth-signed) if not found.  Empty needle
 /// matches at index 0.  Caller type-checks both inputs.
 #[no_mangle]
-pub extern "C" fn rt_string_find(needle: u64, haystack: u64) -> u64 {
+pub extern "win64" fn rt_string_find(needle: u64, haystack: u64) -> u64 {
     let (n_ptr, n_len) = unsafe { string_payload(needle) };
     let (h_ptr, h_len) = unsafe { string_payload(haystack) };
     if n_len == 0 {
@@ -1760,7 +1864,7 @@ pub extern "C" fn rt_string_find(needle: u64, haystack: u64) -> u64 {
 
 /// True iff `prefix` matches the first `prefix.len` bytes of `s`.
 #[no_mangle]
-pub extern "C" fn rt_string_starts(prefix: u64, s: u64) -> u64 {
+pub extern "win64" fn rt_string_starts(prefix: u64, s: u64) -> u64 {
     let (p_ptr, p_len) = unsafe { string_payload(prefix) };
     let (s_ptr, s_len) = unsafe { string_payload(s) };
     if p_len > s_len {
@@ -1773,7 +1877,7 @@ pub extern "C" fn rt_string_starts(prefix: u64, s: u64) -> u64 {
 
 /// True iff `suffix` matches the last `suffix.len` bytes of `s`.
 #[no_mangle]
-pub extern "C" fn rt_string_ends(suffix: u64, s: u64) -> u64 {
+pub extern "win64" fn rt_string_ends(suffix: u64, s: u64) -> u64 {
     let (p_ptr, p_len) = unsafe { string_payload(suffix) };
     let (s_ptr, s_len) = unsafe { string_payload(s) };
     if p_len > s_len {
@@ -1789,7 +1893,7 @@ pub extern "C" fn rt_string_ends(suffix: u64, s: u64) -> u64 {
 /// +1 if a > b.  Same convention as memcmp's sign / Rust's
 /// `Ord::cmp`.
 #[no_mangle]
-pub extern "C" fn rt_string_cmp(tagged_a: u64, tagged_b: u64) -> u64 {
+pub extern "win64" fn rt_string_cmp(tagged_a: u64, tagged_b: u64) -> u64 {
     let (a_ptr, a_len) = unsafe { string_payload(tagged_a) };
     let (b_ptr, b_len) = unsafe { string_payload(tagged_b) };
     let a = unsafe { std::slice::from_raw_parts(a_ptr, a_len) };
@@ -1806,7 +1910,7 @@ pub extern "C" fn rt_string_cmp(tagged_a: u64, tagged_b: u64) -> u64 {
 /// single process run.  Identical inputs hash identically across
 /// calls.
 #[no_mangle]
-pub extern "C" fn rt_string_hash(tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_hash(tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let mut h: u64 = 0xcbf29ce484222325; // FNV-1a 64-bit basis
@@ -1820,7 +1924,7 @@ pub extern "C" fn rt_string_hash(tagged: u64) -> u64 {
 /// ASCII-only case-insensitive equality.  Non-ASCII bytes
 /// compare as-is (no Unicode folding — that's a later stage).
 #[no_mangle]
-pub extern "C" fn rt_string_ci_eq(tagged_a: u64, tagged_b: u64) -> u64 {
+pub extern "win64" fn rt_string_ci_eq(tagged_a: u64, tagged_b: u64) -> u64 {
     let (a_ptr, a_len) = unsafe { string_payload(tagged_a) };
     let (b_ptr, b_len) = unsafe { string_payload(tagged_b) };
     if a_len != b_len {
@@ -1840,7 +1944,7 @@ pub extern "C" fn rt_string_ci_eq(tagged_a: u64, tagged_b: u64) -> u64 {
 /// Trim ASCII whitespace from both ends, return a fresh String.
 /// (Unicode whitespace handling is V2s stage D.)
 #[no_mangle]
-pub extern "C" fn rt_string_trim(up: u64, tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_trim(up: u64, tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let mut start = 0;
@@ -1857,7 +1961,7 @@ pub extern "C" fn rt_string_trim(up: u64, tagged: u64) -> u64 {
 
 /// Trim ASCII whitespace from the left only.
 #[no_mangle]
-pub extern "C" fn rt_string_ltrim(up: u64, tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_ltrim(up: u64, tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let mut start = 0;
@@ -1870,7 +1974,7 @@ pub extern "C" fn rt_string_ltrim(up: u64, tagged: u64) -> u64 {
 
 /// Trim ASCII whitespace from the right only.
 #[no_mangle]
-pub extern "C" fn rt_string_rtrim(up: u64, tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_rtrim(up: u64, tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let mut end = len;
@@ -1882,7 +1986,7 @@ pub extern "C" fn rt_string_rtrim(up: u64, tagged: u64) -> u64 {
 
 /// Format a signed integer as a decimal `String`.
 #[no_mangle]
-pub extern "C" fn rt_int_to_string(up: u64, n: u64) -> u64 {
+pub extern "win64" fn rt_int_to_string(up: u64, n: u64) -> u64 {
     let s = (n as i64).to_string();
     rt_string_from_bytes(up, s.as_ptr() as u64, s.len() as u64)
 }
@@ -1894,7 +1998,7 @@ pub extern "C" fn rt_int_to_string(up: u64, n: u64) -> u64 {
 /// whose top two bits are NOT `10`).  Returns `u64::MAX` on
 /// malformed UTF-8.
 #[no_mangle]
-pub extern "C" fn rt_string_clen(tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_clen(tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let Ok(s) = std::str::from_utf8(bytes) else {
@@ -1907,7 +2011,7 @@ pub extern "C" fn rt_string_clen(tagged: u64) -> u64 {
 /// codepoint as u32 (in u64) on success, or `u64::MAX` if the
 /// index is out of range OR the payload is malformed UTF-8.
 #[no_mangle]
-pub extern "C" fn rt_string_cat(tagged: u64, char_idx: u64) -> u64 {
+pub extern "win64" fn rt_string_cat(tagged: u64, char_idx: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let Ok(s) = std::str::from_utf8(bytes) else {
@@ -1922,7 +2026,7 @@ pub extern "C" fn rt_string_cat(tagged: u64, char_idx: u64) -> u64 {
 /// True (returns -1) iff the payload is well-formed UTF-8.
 /// Cheap predicate; no allocation.
 #[no_mangle]
-pub extern "C" fn rt_string_valid(tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_valid(tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     if std::str::from_utf8(bytes).is_ok() { u64::MAX } else { 0 }
@@ -1932,7 +2036,7 @@ pub extern "C" fn rt_string_valid(tagged: u64) -> u64 {
 /// encoding of `codepoint`.  Returns `u64::MAX` for invalid
 /// codepoints (surrogates or > U+10FFFF).
 #[no_mangle]
-pub extern "C" fn rt_char_to_string(up: u64, codepoint: u64) -> u64 {
+pub extern "win64" fn rt_char_to_string(up: u64, codepoint: u64) -> u64 {
     let Some(c) = char::from_u32(codepoint as u32) else {
         eprintln!("char$: invalid codepoint {codepoint:#x}");
         return u64::MAX;
@@ -1947,7 +2051,7 @@ pub extern "C" fn rt_char_to_string(up: u64, codepoint: u64) -> u64 {
 /// German ß uppercases to "SS").  Returns `u64::MAX` on alloc
 /// failure or malformed UTF-8 in the input.
 #[no_mangle]
-pub extern "C" fn rt_string_upper(up: u64, tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_upper(up: u64, tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let Ok(s) = std::str::from_utf8(bytes) else {
@@ -1960,7 +2064,7 @@ pub extern "C" fn rt_string_upper(up: u64, tagged: u64) -> u64 {
 
 /// Unicode-aware lowercase conversion.  Same shape as `rt_string_upper`.
 #[no_mangle]
-pub extern "C" fn rt_string_lower(up: u64, tagged: u64) -> u64 {
+pub extern "win64" fn rt_string_lower(up: u64, tagged: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let Ok(s) = std::str::from_utf8(bytes) else {
@@ -1976,7 +2080,7 @@ pub extern "C" fn rt_string_lower(up: u64, tagged: u64) -> u64 {
 /// returns 0 (Forth false) and `*out_bits` is unchanged.
 /// Trims surrounding ASCII whitespace before parsing.
 #[no_mangle]
-pub extern "C" fn rt_string_to_float(tagged: u64, out_bits: u64) -> u64 {
+pub extern "win64" fn rt_string_to_float(tagged: u64, out_bits: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let Ok(text) = std::str::from_utf8(bytes) else {
@@ -2006,7 +2110,7 @@ pub extern "C" fn rt_string_to_float(tagged: u64, out_bits: u64) -> u64 {
 /// shortest-round-trip output.  Some output examples: 1, 1.5,
 /// -3.14159, inf, NaN.
 #[no_mangle]
-pub extern "C" fn rt_float_to_string(up: u64, bits: u64) -> u64 {
+pub extern "win64" fn rt_float_to_string(up: u64, bits: u64) -> u64 {
     let v = f64::from_bits(bits);
     let s = format!("{v}");
     rt_string_from_bytes(up, s.as_ptr() as u64, s.len() as u64)
@@ -2015,7 +2119,7 @@ pub extern "C" fn rt_float_to_string(up: u64, bits: u64) -> u64 {
 /// Append the formatted-float representation of `bits` to the
 /// builder.  Returns 0 on success, `u64::MAX` on capacity overflow.
 #[no_mangle]
-pub extern "C" fn rt_sb_append_float(builder_tagged: u64, bits: u64) -> u64 {
+pub extern "win64" fn rt_sb_append_float(builder_tagged: u64, bits: u64) -> u64 {
     let v = f64::from_bits(bits);
     let s = format!("{v}");
     rt_sb_append_bytes(builder_tagged, s.as_ptr() as u64, s.len() as u64)
@@ -2030,7 +2134,7 @@ pub extern "C" fn rt_sb_append_float(builder_tagged: u64, bits: u64) -> u64 {
 /// allocate via the no-retry path so a mid-loop collect_full
 /// can't move earlier pieces.
 #[no_mangle]
-pub extern "C" fn rt_string_words_into(
+pub extern "win64" fn rt_string_words_into(
     _up: u64,
     haystack: u64,
     out_addr: u64,
@@ -2073,7 +2177,7 @@ pub extern "C" fn rt_string_words_into(
 /// True iff `needle` occurs anywhere in `haystack` (byte search).
 /// Empty needle is always considered contained.
 #[no_mangle]
-pub extern "C" fn rt_string_contains(needle: u64, haystack: u64) -> u64 {
+pub extern "win64" fn rt_string_contains(needle: u64, haystack: u64) -> u64 {
     let (n_ptr, n_len) = unsafe { string_payload(needle) };
     let (h_ptr, h_len) = unsafe { string_payload(haystack) };
     if n_len == 0 {
@@ -2096,7 +2200,7 @@ pub extern "C" fn rt_string_contains(needle: u64, haystack: u64) -> u64 {
 /// needle returns `haystack.len`.  Returns `u64::MAX` (-1) if no
 /// match.
 #[no_mangle]
-pub extern "C" fn rt_string_rfind(needle: u64, haystack: u64) -> u64 {
+pub extern "win64" fn rt_string_rfind(needle: u64, haystack: u64) -> u64 {
     let (n_ptr, n_len) = unsafe { string_payload(needle) };
     let (h_ptr, h_len) = unsafe { string_payload(haystack) };
     if n_len == 0 {
@@ -2123,7 +2227,7 @@ pub extern "C" fn rt_string_rfind(needle: u64, haystack: u64) -> u64 {
 /// `n == 0` returns an empty String; very large `n` may overflow
 /// u32 length and is rejected.
 #[no_mangle]
-pub extern "C" fn rt_string_repeat(up: u64, tagged: u64, n: u64) -> u64 {
+pub extern "win64" fn rt_string_repeat(up: u64, tagged: u64, n: u64) -> u64 {
     let (src_ptr, src_len) = unsafe { string_payload(tagged) };
     let Some(total) = (src_len as u64).checked_mul(n) else {
         eprintln!("$repeat: overflow ({src_len} × {n})");
@@ -2170,7 +2274,7 @@ pub extern "C" fn rt_string_repeat(up: u64, tagged: u64, n: u64) -> u64 {
 /// returning a fresh String.  Empty needle returns `haystack`
 /// untouched (we don't loop forever on the zero-length match).
 #[no_mangle]
-pub extern "C" fn rt_string_replace(
+pub extern "win64" fn rt_string_replace(
     up: u64,
     needle: u64,
     repl: u64,
@@ -2307,7 +2411,7 @@ fn alloc_string_copy_no_retry(src: *const u8, len: usize) -> u64 {
 /// mid-loop collect_full can't move earlier pieces out from under
 /// the destination slots (which aren't a GC root region).
 #[no_mangle]
-pub extern "C" fn rt_string_split_into(
+pub extern "win64" fn rt_string_split_into(
     _up: u64,
     sep: u64,
     haystack: u64,
@@ -2375,7 +2479,7 @@ pub extern "C" fn rt_string_split_into(
 /// surfaces as "false" with no value pushed), otherwise the
 /// parsed value (and the kernel pushes both value + true).
 #[no_mangle]
-pub extern "C" fn rt_string_to_int(tagged: u64, out_value: u64) -> u64 {
+pub extern "win64" fn rt_string_to_int(tagged: u64, out_value: u64) -> u64 {
     let (ptr, len) = unsafe { string_payload(tagged) };
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     let s = match std::str::from_utf8(bytes) {
@@ -2397,7 +2501,7 @@ pub extern "C" fn rt_string_to_int(tagged: u64, out_value: u64) -> u64 {
 /// `wf64` binary (where the fconsole module isn't compiled in)
 /// and on non-Windows.
 #[no_mangle]
-pub extern "C" fn rt_igui_page() -> u64 {
+pub extern "win64" fn rt_igui_page() -> u64 {
     #[cfg(windows)]
     {
         crate::igui::fconsole::clear_screen();
@@ -2418,7 +2522,7 @@ pub static BUG_PANIC_PENDING: std::sync::atomic::AtomicBool =
 /// (run_drain_loop after the JIT returns), where unwinding is
 /// well-defined.  Never panics from inside the extern "C" body.
 #[no_mangle]
-pub extern "C" fn rt_bug_rust_panic() -> u64 {
+pub extern "win64" fn rt_bug_rust_panic() -> u64 {
     BUG_PANIC_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
     0
 }
@@ -2433,7 +2537,7 @@ pub extern "C" fn rt_bug_rust_panic() -> u64 {
 /// Implemented in Rust (not in Forth code calling `0 @`) so the
 /// AV happens at a known RIP we can recognise in the dump.
 #[no_mangle]
-pub extern "C" fn rt_bug_seh_av() -> u64 {
+pub extern "win64" fn rt_bug_seh_av() -> u64 {
     let p: *const u64 = std::ptr::null();
     unsafe { std::ptr::read_volatile(p) }
 }
@@ -2443,7 +2547,7 @@ pub extern "C" fn rt_bug_seh_av() -> u64 {
 /// through emit's write path.  Lands in `IGUI_PENDING_AT_XY` so
 /// future streaming-IO work can pick it up.
 #[no_mangle]
-pub extern "C" fn rt_igui_at_xy(col: u64, row: u64) -> u64 {
+pub extern "win64" fn rt_igui_at_xy(col: u64, row: u64) -> u64 {
     #[cfg(windows)]
     {
         IGUI_PENDING_AT_XY.with(|c| c.set(Some((col as usize, row as usize))));
@@ -2477,7 +2581,7 @@ thread_local! {
 /// UTF-8 title (read from `title_addr..title_addr+title_len`).
 /// Returns the child_id (positive i64) on success, 0 on failure.
 #[no_mangle]
-pub extern "C" fn rt_gpane_open(
+pub extern "win64" fn rt_gpane_open(
     width: u64,
     height: u64,
     title_addr: u64,
@@ -2508,7 +2612,7 @@ pub extern "C" fn rt_gpane_open(
 /// Begin a draw batch targeting `child_id`.  Replaces any in-progress
 /// batch on this thread.  Pair with `rt_gpane_present`.
 #[no_mangle]
-pub extern "C" fn rt_gpane_begin(child_id: u64) -> u64 {
+pub extern "win64" fn rt_gpane_begin(child_id: u64) -> u64 {
     #[cfg(windows)]
     {
         crate::igui::batch::begin(child_id as i64);
@@ -2520,7 +2624,7 @@ pub extern "C" fn rt_gpane_begin(child_id: u64) -> u64 {
 /// Submit the current batch to the GUI thread; paints next frame.
 /// No-op if no batch is in progress.
 #[no_mangle]
-pub extern "C" fn rt_gpane_present() -> u64 {
+pub extern "win64" fn rt_gpane_present() -> u64 {
     #[cfg(windows)]
     {
         if let Some(batch) = crate::igui::batch::finish() {
@@ -2542,7 +2646,7 @@ fn rgb_to_rgba(packed: u64) -> crate::igui::batch::Rgba {
 
 /// Clear the pane with `rgb` (packed 0xRRGGBB).
 #[no_mangle]
-pub extern "C" fn rt_gpane_clear(rgb: u64) -> u64 {
+pub extern "win64" fn rt_gpane_clear(rgb: u64) -> u64 {
     #[cfg(windows)]
     {
         crate::igui::batch::push(
@@ -2557,7 +2661,7 @@ pub extern "C" fn rt_gpane_clear(rgb: u64) -> u64 {
 
 /// Fill a rectangle at (x, y) with size (w × h).
 #[no_mangle]
-pub extern "C" fn rt_gpane_fill_rect(
+pub extern "win64" fn rt_gpane_fill_rect(
     x: u64, y: u64, w: u64, h: u64, rgb: u64,
 ) -> u64 {
     #[cfg(windows)]
@@ -2580,7 +2684,7 @@ pub extern "C" fn rt_gpane_fill_rect(
 
 /// Stroke a rectangle.  `thick` is the line thickness in pixels.
 #[no_mangle]
-pub extern "C" fn rt_gpane_stroke_rect(
+pub extern "win64" fn rt_gpane_stroke_rect(
     x: u64, y: u64, w: u64, h: u64, thick: u64, rgb: u64,
 ) -> u64 {
     #[cfg(windows)]
@@ -2605,7 +2709,7 @@ pub extern "C" fn rt_gpane_stroke_rect(
 
 /// Draw a line from (x0,y0) to (x1,y1) with thickness `thick`.
 #[no_mangle]
-pub extern "C" fn rt_gpane_line(
+pub extern "win64" fn rt_gpane_line(
     x0: u64, y0: u64, x1: u64, y1: u64, thick: u64, rgb: u64,
 ) -> u64 {
     #[cfg(windows)]
@@ -2628,7 +2732,7 @@ pub extern "C" fn rt_gpane_line(
 
 /// Fill a circle centered at (cx,cy) with radius `r`.
 #[no_mangle]
-pub extern "C" fn rt_gpane_fill_circle(
+pub extern "win64" fn rt_gpane_fill_circle(
     cx: u64, cy: u64, r: u64, rgb: u64,
 ) -> u64 {
     #[cfg(windows)]
@@ -2666,7 +2770,7 @@ pub extern "C" fn rt_gpane_fill_circle(
 /// call returns.  Hands the copy to the batch as one `Blit` command.
 /// Returns 0 (command-style); a no-op off Windows.
 #[no_mangle]
-pub extern "C" fn rt_canvas_blit(child_id: u64, src_addr: u64, w: u64, h: u64) -> u64 {
+pub extern "win64" fn rt_canvas_blit(child_id: u64, src_addr: u64, w: u64, h: u64) -> u64 {
     #[cfg(windows)]
     {
         let (w, h) = (w as usize, h as usize);
@@ -2699,7 +2803,7 @@ pub extern "C" fn rt_canvas_blit(child_id: u64, src_addr: u64, w: u64, h: u64) -
 /// `title_addr..title_addr+title_len`.  Returns the child id (>0) on
 /// success, 0 on failure.
 #[no_mangle]
-pub extern "C" fn rt_doc_open(title_addr: u64, title_len: u64) -> u64 {
+pub extern "win64" fn rt_doc_open(title_addr: u64, title_len: u64) -> u64 {
     #[cfg(windows)]
     {
         let title = unsafe {
@@ -2722,7 +2826,7 @@ pub extern "C" fn rt_doc_open(title_addr: u64, title_len: u64) -> u64 {
 /// `md_addr..md_addr+md_len`.  Returns 1 on success, 0 if the pane is
 /// gone or the bytes aren't valid UTF-8.
 #[no_mangle]
-pub extern "C" fn rt_doc_set(child_id: u64, md_addr: u64, md_len: u64) -> u64 {
+pub extern "win64" fn rt_doc_set(child_id: u64, md_addr: u64, md_len: u64) -> u64 {
     #[cfg(windows)]
     {
         let bytes = unsafe {
@@ -2741,7 +2845,7 @@ pub extern "C" fn rt_doc_set(child_id: u64, md_addr: u64, md_len: u64) -> u64 {
 /// Append the UTF-8 text at `md_addr..md_addr+md_len` to doc-pane
 /// `child_id`'s Markdown.  Returns 1 on success, 0 otherwise.
 #[no_mangle]
-pub extern "C" fn rt_doc_append(child_id: u64, md_addr: u64, md_len: u64) -> u64 {
+pub extern "win64" fn rt_doc_append(child_id: u64, md_addr: u64, md_len: u64) -> u64 {
     #[cfg(windows)]
     {
         let bytes = unsafe {
@@ -2837,7 +2941,7 @@ pub fn decode_event(
 /// predictable: callers always pop the same five cells.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn rt_gpane_next_event_for(
+pub extern "win64" fn rt_gpane_next_event_for(
     child_id: u64,
     timeout_ms: u64,
     out_kind: *mut i64,
@@ -2925,7 +3029,7 @@ pub extern "C" fn rt_gpane_next_event_for(
 /// `up` must be a valid Forth user-area pointer; `src_addr` ..
 /// `src_addr + len` must be readable.
 #[no_mangle]
-pub extern "C" fn rt_s_literal_compile_at_here(
+pub extern "win64" fn rt_s_literal_compile_at_here(
     up: u64,
     src_addr: u64,
     len: u64,
@@ -2989,7 +3093,7 @@ pub extern "C" fn rt_s_literal_compile_at_here(
 /// Both `tagged_a` and `tagged_b` must be valid `String` tagged
 /// pointers.  Nil or wrong-typed inputs will deref invalid memory.
 #[no_mangle]
-pub extern "C" fn rt_string_bytes_equal(tagged_a: u64, tagged_b: u64) -> u64 {
+pub extern "win64" fn rt_string_bytes_equal(tagged_a: u64, tagged_b: u64) -> u64 {
     // Fast path: same object.
     if tagged_a == tagged_b {
         return u64::MAX;
@@ -3162,7 +3266,7 @@ unsafe fn write_u64(addr: u64, val: u64) { unsafe { *(addr as *mut u64) = val } 
 /// SOURCE_LEN / TO_IN / HERE fields are correctly maintained by the
 /// kernel.
 #[no_mangle]
-pub extern "C" fn rt_let_compile(up: u64) -> u64 {
+pub extern "win64" fn rt_let_compile(up: u64) -> u64 {
     match unsafe { try_compile_let(up) } {
         Ok(()) => 0,
         Err(msg) => {
@@ -3479,7 +3583,7 @@ pub fn reset_code_session() {
 /// Returns the address of the JIT-compiled function on success, or 0
 /// on any failure (the kernel surfaces this as a THROW).
 #[no_mangle]
-pub extern "C" fn rt_code_compile_body(up: u64) -> u64 {
+pub extern "win64" fn rt_code_compile_body(up: u64) -> u64 {
     match unsafe { try_compile_code(up) } {
         Ok(addr) => addr,
         Err(msg) => {
@@ -3729,6 +3833,16 @@ fn write_bytes(bytes: &[u8]) {
     // per-pane buffer, not the shared session I/O. The operator and unbound
     // agents fall through to the normal path. See docs/design/wf66_pane_agent_gui.md.
     if crate::agents::route_output(bytes) {
+        return;
+    }
+    // A host writer (the BOX's VDU) gets output as it is made. quit's own
+    // " ok" after each line is left out: the host's REPL prints its own,
+    // and a file or the boot library must not print one per line.
+    if let Some(write) = f66_host::hooks().and_then(|h| h.write) {
+        if bytes == b" ok\n" || MUTED.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        write(bytes.as_ptr(), bytes.len());
         return;
     }
     with_current_io(|io| match io {

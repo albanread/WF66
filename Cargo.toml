@@ -20,6 +20,8 @@ opt-metrics = ["dep:iced-x86", "dep:blake3", "dep:serde", "dep:serde_json"]
 # crates.io dep once JASM stabilises.
 wfasm = { path = "../JASM/rust", default-features = false }
 newgc-core = { path = "../NewGC/crates/newgc-core" }
+# The host hooks of the BOX (rosgd/modules/forth), shared with MF66.
+f66-host = { path = "../MF66/host" }
 anyhow = "1"
 # libloading — runtime DLL loading for factor.dll (NewFactor IDE).
 libloading = "0.8"

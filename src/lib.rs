@@ -27,6 +27,9 @@
 
 pub mod agents;
 pub mod runtime;
+// The kernel's KERNEL32/msvcrt imports on Linux (the BOX).
+#[cfg(not(windows))]
+mod winshim;
 pub mod wf32_port;
 
 use std::ffi::c_void;
@@ -115,6 +118,45 @@ pub fn default_kernel_path() -> PathBuf {
     }
     PathBuf::from(KERNEL_ENTRY)
 }
+
+/// The kernel's source, built in, for hosts with no checkout to read it
+/// from (the BOX): [`Wf64Session::builtin`].
+pub const KERNEL_SOURCES: &[(&str, &str)] = &[
+    ("agents.masm", include_str!("../kernel/agents.masm")),
+    ("arith.masm", include_str!("../kernel/arith.masm")),
+    ("compare.masm", include_str!("../kernel/compare.masm")),
+    ("compile.masm", include_str!("../kernel/compile.masm")),
+    ("dict.masm", include_str!("../kernel/dict.masm")),
+    ("execute.masm", include_str!("../kernel/execute.masm")),
+    ("facility.masm", include_str!("../kernel/facility.masm")),
+    ("float.masm", include_str!("../kernel/float.masm")),
+    ("fmath.masm", include_str!("../kernel/fmath.masm")),
+    ("gc.masm", include_str!("../kernel/gc.masm")),
+    ("igui.masm", include_str!("../kernel/igui.masm")),
+    ("igui_gfx.masm", include_str!("../kernel/igui_gfx.masm")),
+    ("interp.masm", include_str!("../kernel/interp.masm")),
+    ("io.masm", include_str!("../kernel/io.masm")),
+    ("locals.masm", include_str!("../kernel/locals.masm")),
+    ("logic.masm", include_str!("../kernel/logic.masm")),
+    ("macros.masm", include_str!("../kernel/macros.masm")),
+    ("main.masm", include_str!("../kernel/main.masm")),
+    ("memory.masm", include_str!("../kernel/memory.masm")),
+    ("number.masm", include_str!("../kernel/number.masm")),
+    ("oop.masm", include_str!("../kernel/oop.masm")),
+    ("parse.masm", include_str!("../kernel/parse.masm")),
+    ("rstack.masm", include_str!("../kernel/rstack.masm")),
+    ("runtime_decls.masm", include_str!("../kernel/runtime_decls.masm")),
+    ("stack.masm", include_str!("../kernel/stack.masm")),
+    ("strings.masm", include_str!("../kernel/strings.masm")),
+    ("strings_managed.masm", include_str!("../kernel/strings_managed.masm")),
+];
+
+/// The source library a built-in session loads: core.f and the object
+/// system. (agents.f and view.f are the Windows IDE's.)
+pub const LIB_SOURCES: &[(&str, &str)] = &[
+    ("core.f", include_str!("../lib/core.f")),
+    ("oop.f", include_str!("../lib/oop.f")),
+];
 
 /// (forth_name, asm_symbol, flags). Insertion order = scan order:
 /// most-recently-inserted is matched first by `find-name`.
@@ -633,6 +675,9 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("rt-slurp-file", "rt_slurp_file_word", 0),
     ("rt-slurp-len",  "rt_slurp_len_word",  0),
     ("rt-slurp-pop",  "rt_slurp_pop_word",  0),
+    // The BOX (RISC OS SWIs, through the host); elsewhere they fail.
+    ("(swi)",         "paren_swi_word",        0),
+    ("(swi#)",        "paren_swi_number_word", 0),
     (":noname",    "noname_word", 0),
     (":",          "colon",      0),
     ("create",     "create_word", 0),
@@ -1011,11 +1056,13 @@ impl UnwindInfo {
     }
 }
 
+#[cfg(windows)]
 type VirtualAlloc2Fn = unsafe extern "system" fn(
     *mut c_void, *mut c_void, usize, u32, u32,
     *mut MEM_EXTENDED_PARAMETER, u32,
 ) -> *mut c_void;
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
@@ -1140,6 +1187,7 @@ fn align_up(addr: u64, align: u64) -> u64 {
     (addr + align - 1) & !(align - 1)
 }
 
+#[cfg(windows)]
 fn get_virtual_alloc2() -> Result<VirtualAlloc2Fn> {
     let dll: Vec<u16> = "api-ms-win-core-memory-l1-1-6.dll"
         .encode_utf16().chain(std::iter::once(0)).collect();
@@ -1155,6 +1203,7 @@ fn get_virtual_alloc2() -> Result<VirtualAlloc2Fn> {
     Ok(unsafe { std::mem::transmute::<*mut c_void, VirtualAlloc2Fn>(addr) })
 }
 
+#[cfg(windows)]
 fn alloc_forth_region(kernel_addr: u64) -> Result<*mut c_void> {
     let va2 = get_virtual_alloc2().context("locate VirtualAlloc2")?;
     const GRANULARITY: u64 = 0x10000;
@@ -1197,6 +1246,7 @@ fn alloc_forth_region(kernel_addr: u64) -> Result<*mut c_void> {
 // kernel, and a ±128 MB window keeps the arena within rel32 (±2 GB) of BOTH
 // the kernel and the dict heap, so `call rel32` reaches it either way.
 // RWX so runtime CODE:/LET placement can copy native bytes directly.
+#[cfg(windows)]
 fn alloc_jit_arena(anchor: u64) -> Result<*mut c_void> {
     let va2 = get_virtual_alloc2().context("locate VirtualAlloc2")?;
     const GRANULARITY: u64 = 0x10000;
@@ -1234,6 +1284,7 @@ fn alloc_jit_arena(anchor: u64) -> Result<*mut c_void> {
 // Locals stack region — a separate 1 MB block. Addressed exclusively
 // through R15-relative loads, so it doesn't need to live near the
 // kernel; plain VirtualAlloc is enough.
+#[cfg(windows)]
 extern "system" {
     fn VirtualAlloc(
         lpAddress: *mut c_void,
@@ -1246,6 +1297,7 @@ extern "system" {
 const PAGE_READWRITE: u32 = 0x04;
 const MEM_RELEASE:    u32 = 0x8000;
 
+#[cfg(windows)]
 fn alloc_locals_region() -> Result<*mut c_void> {
     let base = unsafe {
         VirtualAlloc(
@@ -1273,6 +1325,7 @@ fn alloc_locals_region() -> Result<*mut c_void> {
 /// we fall back to an unconstrained `VirtualAlloc`, and the inliner falls back
 /// to the imm64 form per reference (the displacement is range-checked at
 /// compile time), so correctness never depends on where the region lands.
+#[cfg(windows)]
 fn alloc_var_region(anchor: u64) -> Result<*mut c_void> {
     // ±512 MB window: comfortably inside the ±2 GB rel32 reach of any
     // instruction in the 128 MB code region, while giving the allocator 1 GB
@@ -1320,10 +1373,146 @@ fn alloc_var_region(anchor: u64) -> Result<*mut c_void> {
     Ok(base)
 }
 
+// ── Linux (the BOX's /init) ──────────────────────────────────────────
+//
+// The same regions by mmap (JASM's jitmem), each in rel32 reach of what it
+// must reach, as VirtualAlloc2 places them on Windows. The data (variable)
+// region comes from the host when it gives one: in the BOX that is a RISC OS
+// dynamic area, so `create`d buffers, `here` and `s"` strings have RISC OS
+// addresses a SWI can be given. The few Win32 calls the session makes on
+// code pages have shims of the same shape here, so their call sites are
+// shared.
+
+#[cfg(not(windows))]
+mod posix {
+    use super::*;
+    use wfasm::jitmem;
+
+    pub(super) fn alloc_forth_region(kernel_addr: u64) -> Result<*mut c_void> {
+        let p = jitmem::map_near(kernel_addr, REGION_SIZE, true);
+        if p.is_null() {
+            anyhow::bail!("no room for the Forth region near the kernel at {kernel_addr:#018x}");
+        }
+        Ok(p as *mut c_void)
+    }
+
+    pub(super) fn alloc_jit_arena(anchor: u64) -> Result<*mut c_void> {
+        let p = jitmem::map_near(anchor, JIT_ARENA_SIZE, true);
+        if p.is_null() {
+            anyhow::bail!("no room for the JIT arena near {anchor:#018x}");
+        }
+        Ok(p as *mut c_void)
+    }
+
+    pub(super) fn alloc_locals_region() -> Result<*mut c_void> {
+        let p = jitmem::map_rw(LOCALS_REGION_SIZE);
+        if p.is_null() {
+            anyhow::bail!("locals region mmap failed");
+        }
+        Ok(p as *mut c_void)
+    }
+
+    /// The data region and whether the host gave it.
+    pub(super) fn alloc_var_region(anchor: u64) -> Result<(*mut c_void, bool)> {
+        if let Some(p) = f66_host::region_alloc(VAR_REGION_SIZE) {
+            return Ok((p as *mut c_void, true));
+        }
+        let mut p = jitmem::map_near(anchor, VAR_REGION_SIZE, false);
+        if p.is_null() {
+            p = jitmem::map_rw(VAR_REGION_SIZE);
+        }
+        if p.is_null() {
+            anyhow::bail!("data (variable) region mmap failed");
+        }
+        Ok((p as *mut c_void, false))
+    }
+
+    pub(super) fn release(p: *mut c_void, len: usize) {
+        jitmem::unmap(p as *mut u8, len);
+    }
+
+    extern "C" {
+        fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
+    }
+
+    /// VirtualProtect's shape: the regions are mapped RWX on Linux, so the
+    /// old protection is always RWX and a change is made with mprotect.
+    #[allow(non_snake_case)]
+    pub(super) unsafe fn VirtualProtect(p: *mut c_void, len: usize, new: u32, old: *mut u32) -> i32 {
+        let prot = match new {
+            0x40 => 7, // PAGE_EXECUTE_READWRITE
+            0x20 => 5, // PAGE_EXECUTE_READ
+            0x04 => 3, // PAGE_READWRITE
+            _ => 7,
+        };
+        if !old.is_null() {
+            *old = 0x40;
+        }
+        (mprotect(p, len, prot) == 0) as i32
+    }
+
+    #[allow(non_snake_case)]
+    pub(super) unsafe fn GetLastError() -> u32 {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32
+    }
+
+    /// No SEH on Linux: unwind tables for Forth words are not registered.
+    #[allow(non_snake_case)]
+    pub(super) unsafe fn RtlAddFunctionTable(_t: *const RuntimeFunction, _n: u32, _base: u64) -> u8 {
+        1
+    }
+
+    #[allow(non_snake_case)]
+    pub(super) unsafe fn RtlDeleteFunctionTable(_t: *const RuntimeFunction) -> u8 {
+        1
+    }
+}
+#[cfg(not(windows))]
+use posix::*;
+
+/// Bind the kernel's `@extern`s: host functions by `resolve`, and on Windows
+/// DLL imports by LoadLibrary (wfasm::win32). Linux has no DLL imports: the
+/// kernel's are all host functions.
+fn bind_kernel_externs(
+    asm: &Assembler,
+    jit: &mut dyn wfasm::Loader,
+    resolve: impl FnMut(&str) -> Option<*mut c_void>,
+) -> Result<()> {
+    #[cfg(windows)]
+    {
+        wfasm::win32::bind_externs(asm, jit, resolve).context("bind_externs failed")?;
+    }
+    #[cfg(not(windows))]
+    {
+        let mut resolve = resolve;
+        let externs: Vec<(String, usize, Option<String>)> = asm
+            .externs()
+            .map(|(n, d)| (n.to_string(), d.arg_count, d.dll.clone()))
+            .collect();
+        for (name, args, dll) in externs {
+            let addr = match dll {
+                Some(_) => winshim::lookup(&name),
+                None => resolve(&name),
+            };
+            let addr = addr.with_context(|| match dll {
+                Some(d) => format!("the kernel imports {name} from {d}, which this platform has not"),
+                None => format!("no host function for the kernel's extern {name}"),
+            })?;
+            jit.define_extern_fn(&name, args, addr)?;
+        }
+    }
+    Ok(())
+}
+
 // ── Wf64Session ──────────────────────────────────────────────────────
 
 /// `forth_main(target_xt, logical_dsp_in, rsp_top, user_base) → 0`.
-type ForthMain = unsafe extern "system" fn(u64, u64, u64, u64) -> u64;
+///
+/// The kernel's host calls keep the Win64 convention on every platform (rcx,
+/// rdx, r8, r9, 32 bytes of shadow space): its entry is `extern "win64"` and
+/// so is every `rt_*` host function, which on Windows is the same as
+/// `extern "C"`. One kernel and one code generator serve Windows and Linux.
+type ForthMain = unsafe extern "win64" fn(u64, u64, u64, u64) -> u64;
 
 pub struct Wf64Session {
     /// Boot kernel loader — native `RasmEncoder` + `NativeJit`. Only the
@@ -1333,6 +1522,9 @@ pub struct Wf64Session {
     forth_main: ForthMain,
     #[allow(dead_code)]
     region_base: u64,
+    /// The mappings Drop gives back (Linux; empty on Windows).
+    #[allow(dead_code)]
+    mappings: Vec<(u64, usize)>,
     /// Base of the 1 MB locals stack region (separate VirtualAlloc).
     /// Released by `Drop`. R15 (the locals stack pointer) is initialised
     /// to `locals_base + LOCALS_REGION_SIZE` (top) at every `forth_main`
@@ -1408,6 +1600,12 @@ impl Wf64Session {
         Self::with_kernel(default_kernel_path())
     }
 
+    /// A session from the built-in kernel and library ([`KERNEL_SOURCES`],
+    /// [`LIB_SOURCES`]): no files are read.
+    pub fn builtin() -> Result<Self> {
+        Self::boot(None)
+    }
+
     pub fn with_kernel(kernel_path: impl AsRef<Path>) -> Result<Self> {
         let kernel_path = kernel_path.as_ref();
         if !kernel_path.exists() {
@@ -1417,8 +1615,13 @@ impl Wf64Session {
                 kernel_path.display()
             );
         }
+        Self::boot(Some(kernel_path))
+    }
+
+    fn boot(kernel_path: Option<&Path>) -> Result<Self> {
 
         // SEH dumper is process-wide; install only on first call.
+        #[cfg(windows)]
         let _ = wfasm::seh::install();
 
         // Boot-phase timing (WF64_BOOT_TIMING=1) — prints the assemble / encode+load
@@ -1429,9 +1632,19 @@ impl Wf64Session {
         // Assemble.
         let mut asm = Assembler::new();
         asm.register_macro("stk", wfasm::asm::macros::stk);
-        let mut asm_text = asm
-            .assemble_file(kernel_path)
-            .with_context(|| format!("assemble {}", kernel_path.display()))?;
+        let mut asm_text = match kernel_path {
+            Some(kernel_path) => asm
+                .assemble_file(kernel_path)
+                .with_context(|| format!("assemble {}", kernel_path.display()))?,
+            None => {
+                let dir = Path::new("/wf66/kernel");
+                for (name, text) in KERNEL_SOURCES {
+                    asm.add_virtual_file(dir.join(name), *text);
+                }
+                asm.assemble_file(dir.join("main.masm"))
+                    .context("assemble the built-in kernel")?
+            }
+        };
         let t_asm = std::time::Instant::now();
 
         // Rasm migration: a 1-byte sentinel symbol marking the end of the kernel
@@ -1460,7 +1673,7 @@ impl Wf64Session {
             .context("declare kernel-end sentinel")?;
 
         // Bind externs.
-        let _ = wfasm::win32::bind_externs(&asm, &mut *jit, |name| -> Option<*mut c_void> {
+        bind_kernel_externs(&asm, &mut *jit, |name| -> Option<*mut c_void> {
             match name {
                 "rt_print_int" => Some(runtime::rt_print_int as *mut c_void),
                 "rt_dot_s"     => Some(runtime::rt_dot_s     as *mut c_void),
@@ -1508,6 +1721,9 @@ impl Wf64Session {
                 "rt_slurp_file"  => Some(runtime::rt_slurp_file   as *mut c_void),
                 "rt_slurp_len"   => Some(runtime::rt_slurp_len    as *mut c_void),
                 "rt_slurp_pop"   => Some(runtime::rt_slurp_pop    as *mut c_void),
+                "rt_swi"         => Some(runtime::rt_swi          as *mut c_void),
+                "rt_undefined_word" => Some(runtime::rt_undefined_word as *mut c_void),
+                "rt_swi_number"  => Some(runtime::rt_swi_number   as *mut c_void),
                 "rt_let_compile" => Some(runtime::rt_let_compile as *mut c_void),
                 "rt_code_compile_body" => Some(runtime::rt_code_compile_body as *mut c_void),
                 "rt_vec_alloc_floats" => Some(runtime::rt_vec_alloc_floats as *mut c_void),
@@ -1573,7 +1789,7 @@ impl Wf64Session {
                 "rt_gpane_next_event_for" => Some(runtime::rt_gpane_next_event_for as *mut c_void),
                 _ => None,
             }
-        }).context("bind_externs failed")?;
+        })?;
 
         // Pick near memory.
         let kernel_addr = jit.lookup_addr("forth_main")
@@ -1596,7 +1812,28 @@ impl Wf64Session {
 
         // Data space (variables / create bodies) — separate RW / no-execute
         // region so writes never touch executable code (W^X, no SMC clears).
+        #[cfg(windows)]
         let var_base = alloc_var_region(region_u64)? as u64;
+        #[cfg(not(windows))]
+        let (var_base, var_from_host) = {
+            let (p, from_host) = alloc_var_region(region_u64)?;
+            (p as u64, from_host)
+        };
+        // What Drop gives back on Linux (Windows keeps its regions, as before).
+        #[cfg(windows)]
+        let mappings: Vec<(u64, usize)> = Vec::new();
+        #[cfg(not(windows))]
+        let mappings = {
+            let mut m = vec![
+                (region_u64, REGION_SIZE),
+                (jit_arena_base as u64, JIT_ARENA_SIZE),
+                (locals_base_u64, LOCALS_REGION_SIZE),
+            ];
+            if !var_from_host {
+                m.push((var_base, VAR_REGION_SIZE));
+            }
+            m
+        };
 
         let dsp_top   = region_u64 + OFFSET_DSP_TOP;
         let rsp_top   = region_u64 + OFFSET_RSP_TOP;
@@ -1651,8 +1888,11 @@ impl Wf64Session {
             .chain(PRIMITIVES.iter().map(|&(_, sym, _)| sym))
             .chain(KERNEL_HELPERS.iter().copied())
             .collect();
+        #[cfg(windows)]
         wfasm::seh::register_jit_procs(&mut *jit, &proc_names)
             .context("register kernel procs with SEH")?;
+        #[cfg(not(windows))]
+        let _ = &proc_names;
 
         // Register code ranges + the Forth runtime layout so a crash dump is
         // FORTH-CENTRIC: classify return-stack qwords as Forth word addresses
@@ -1708,6 +1948,7 @@ impl Wf64Session {
             jit,
             forth_main,
             region_base: region_u64,
+            mappings,
             locals_base,
             dsp_top,
             rsp_top,
@@ -1753,40 +1994,43 @@ impl Wf64Session {
         // without having to re-load them per test.  main.rs and wf64-ui
         // no longer need to call load_source_file("lib/core.f") because
         // with_kernel() / new() now does it.
-        let core_path = kernel_path
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(Path::new("."))
-            .join("lib")
-            .join("core.f");
-        if core_path.exists() {
-            session.load_source_file(&core_path)
-                .with_context(|| format!("boot: load {}", core_path.display()))?;
-        }
-        let t_core = std::time::Instant::now();
+        let t_core;
+        match kernel_path {
+            Some(kernel_path) => {
+                let core_path = kernel_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .unwrap_or(Path::new("."))
+                    .join("lib")
+                    .join("core.f");
+                if core_path.exists() {
+                    session.load_source_file(&core_path)
+                        .with_context(|| format!("boot: load {}", core_path.display()))?;
+                }
+                t_core = std::time::Instant::now();
 
-        // Load the object system (lib/oop.f) on top of core.f, still
-        // *before* the boot snapshot so its selector table sits below the
-        // reset fence and its words survive reset() like core.f's do.
-        let oop_path = core_path.with_file_name("oop.f");
-        if oop_path.exists() {
-            session.load_source_file(&oop_path)
-                .with_context(|| format!("boot: load {}", oop_path.display()))?;
-        }
-        // Cooperative agent scheduler (lib/agents.f) — defines spawn/pause/
-        // receive/run-slice on top of the kernel agent primitives. (agent-init)
-        // is called by the host on the scheduler thread, not here.
-        let agents_path = core_path.with_file_name("agents.f");
-        if agents_path.exists() {
-            session.load_source_file(&agents_path)
-                .with_context(|| format!("boot: load {}", agents_path.display()))?;
-        }
-        // View base class (lib/view.f) — OO pane-agent app framework on top of
-        // oop.f + agents.f: subclass View, override draw / on-* hooks.
-        let view_path = core_path.with_file_name("view.f");
-        if view_path.exists() {
-            session.load_source_file(&view_path)
-                .with_context(|| format!("boot: load {}", view_path.display()))?;
+                // Load the object system (lib/oop.f) on top of core.f, still
+                // *before* the boot snapshot so its selector table sits below the
+                // reset fence and its words survive reset() like core.f's do.
+                // Then the cooperative agent scheduler (lib/agents.f: spawn/pause/
+                // receive/run-slice on the kernel agent primitives; (agent-init)
+                // is called by the host on the scheduler thread, not here), and
+                // the View base class (lib/view.f: the OO pane-agent app
+                // framework on oop.f + agents.f).
+                for name in ["oop.f", "agents.f", "view.f"] {
+                    let path = core_path.with_file_name(name);
+                    if path.exists() {
+                        session.load_source_file(&path)
+                            .with_context(|| format!("boot: load {}", path.display()))?;
+                    }
+                }
+            }
+            None => {
+                for (name, text) in LIB_SOURCES {
+                    session.eval(text).with_context(|| format!("boot: load {name}"))?;
+                }
+                t_core = std::time::Instant::now();
+            }
         }
         if boot_timing {
             let t_oop = std::time::Instant::now();
@@ -2470,6 +2714,114 @@ impl Wf64Session {
         }
     }
 
+    /// Run `input` through quit with output going wherever it goes (the
+    /// host's writer, or captured). Returns the result, how far quit read
+    /// and what was captured. STATE is left as it is, so a definition may be
+    /// open across calls (a REPL's lines).
+    fn run_quit(&mut self, input: &str) -> (Result<()>, usize, String) {
+        let io = runtime::Io::Buffered {
+            input: input.as_bytes().to_vec(),
+            in_cursor: 0,
+            pending_key: None,
+            output: Vec::new(),
+        };
+        let xt_quit = match self.xt_of("quit") {
+            Ok(x) => x,
+            Err(e) => return (Err(e), 0, String::new()),
+        };
+        let mut call_err: Result<()> = Ok(());
+        runtime::clear_input_ended();
+        let (_, io_after) = runtime::with_io(io, || {
+            call_err = self.call_xt(xt_quit);
+        });
+        match io_after {
+            runtime::Io::Buffered { output, in_cursor, .. } => {
+                let out = String::from_utf8_lossy(&output).into_owned();
+                (call_err.map_err(|e| annotate_forth_error(e, &out)), in_cursor, out)
+            }
+            runtime::Io::Live { .. } => unreachable!("run_quit installed Buffered"),
+        }
+    }
+
+    /// One line of a REPL: a definition may stay open (see [`compiling`]).
+    /// On an error the open definition is dropped and STATE reset.
+    pub fn eval_line(&mut self, line: &str) -> Result<String> {
+        let (r, _, out) = self.run_quit(line);
+        if r.is_err() {
+            self.abandon_definition();
+        }
+        r.map(|()| out)
+    }
+
+    /// A whole source (a file): on an error, the 1-based line it was on.
+    /// A definition left open at the end is an error too.
+    pub fn eval_source(&mut self, src: &str) -> std::result::Result<String, (usize, anyhow::Error)> {
+        self.write_user_u64(USER_STATE_VAR, 0);
+        let (r, cursor, out) = self.run_quit(src);
+        if let Err(e) = r {
+            let read = &src.as_bytes()[..cursor.min(src.len())];
+            let mut line = read.iter().filter(|&&b| b == b'\n').count();
+            if !read.ends_with(b"\n") || line == 0 {
+                line += 1;
+            }
+            self.abandon_definition();
+            return Err((line, e));
+        }
+        if self.compiling() {
+            self.abandon_definition();
+            let lines = src.lines().count().max(1);
+            return Err((lines, anyhow::anyhow!("incomplete definition — ':' without ';'")));
+        }
+        Ok(out)
+    }
+
+    /// The last run ended at `bye` (not at the end of its input, where
+    /// quit sets the same flag).
+    pub fn bye_requested(&self) -> bool {
+        self.user_u64(USER_BYE_REQ) != 0 && !runtime::input_ended()
+    }
+
+    /// A definition is open (STATE is compiling).
+    pub fn compiling(&self) -> bool {
+        self.user_u64(USER_STATE_VAR) != 0
+    }
+
+    /// The number base.
+    pub fn base(&self) -> u64 {
+        self.user_u64(USER_BASE_VAR)
+    }
+
+    /// Drop a definition left open and go back to interpreting.
+    fn abandon_definition(&mut self) {
+        if self.compiling() {
+            let _ = self.call("forget_last_word");
+            self.write_user_u64(USER_STATE_VAR, 0);
+        }
+    }
+
+    /// After a fault (or Escape) left Forth code by a long jump: the stacks,
+    /// the exception frame and the interpreter's state as at the start of a
+    /// line; the dictionary is kept.
+    pub fn recover(&mut self) {
+        runtime::forget_io();
+        self.current_dsp = self.dsp_top;
+        self.write_user_u64(USER_BYE_REQ,      0);
+        self.write_user_u64(USER_RSP_CURRENT,  self.rsp_top);
+        self.write_user_u64(USER_DSP_SAVE,     self.dsp_top);
+        self.write_user_u64(USER_HANDLER_VAR,  0);
+        self.write_user_u64(USER_THROW_CODE,   0);
+        self.write_user_u64(USER_PARSE_BARRIER, 0);
+        self.write_user_u64(USER_LOCALS_COUNT, 0);
+        self.write_user_u64(USER_PIN_RECORDING, 0);
+        self.write_user_u64(USER_PIN_REPLAYING, 0);
+        self.write_user_u64(USER_PIN_NEST,      0);
+        self.write_user_u64(USER_PIN_BUF_LEN,   0);
+        self.write_user_u64(USER_WF66_REC,      0);
+        self.write_user_u64(USER_FP0, self.user_base + USER_FP_STACK + 0x100);
+        self.write_user_u64(USER_FSP, self.user_base + USER_FP_STACK + 0x100);
+        self.abandon_definition();
+    }
+
     /// Load a Forth source file through the normal REPL pipeline.
     ///
     /// This is intentionally simple for the current bootstrap stage:
@@ -2678,6 +3030,7 @@ impl Wf64Session {
 
         let words = self.scan_runtime_words()?;
         self.install_runtime_unwind_table(&words)?;
+        #[cfg(windows)]
         wfasm::seh::register_many(
             words
                 .iter()
@@ -2776,13 +3129,22 @@ impl Wf64Session {
 impl Drop for Wf64Session {
     fn drop(&mut self) {
         self.clear_runtime_unwind_table();
-        if !self.locals_base.is_null() {
-            unsafe { VirtualFree(self.locals_base, 0, MEM_RELEASE); }
-            self.locals_base = ptr::null_mut();
+        #[cfg(not(windows))]
+        {
+            for &(p, len) in &self.mappings {
+                release(p as *mut c_void, len);
+            }
         }
-        if self.var_base != 0 {
-            unsafe { VirtualFree(self.var_base as *mut c_void, 0, MEM_RELEASE); }
-            self.var_base = 0;
+        #[cfg(windows)]
+        {
+            if !self.locals_base.is_null() {
+                unsafe { VirtualFree(self.locals_base, 0, MEM_RELEASE); }
+                self.locals_base = ptr::null_mut();
+            }
+            if self.var_base != 0 {
+                unsafe { VirtualFree(self.var_base as *mut c_void, 0, MEM_RELEASE); }
+                self.var_base = 0;
+            }
         }
     }
 }
